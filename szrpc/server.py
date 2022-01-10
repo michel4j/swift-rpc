@@ -1,3 +1,4 @@
+import re
 import time
 from queue import Queue
 from threading import Thread
@@ -193,7 +194,7 @@ class Service(object):
         allowed = []
         for attr in dir(self):
             if attr.startswith('remote__'):
-                allowed.append(attr.removeprefix('remote__'))
+                allowed.append(re.sub('^remote__', '', attr))
         return allowed
 
 
