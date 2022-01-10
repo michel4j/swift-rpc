@@ -12,7 +12,7 @@ with open("README.md", "r", encoding='utf-8') as fh:
 setup(
     name='szrpc',
     version=get_version(),
-    url="https://github.com/michel4j/gepics",
+    url="https://github.com/michel4j/swift-rpc",
     license='MIT',
     author='Michel Fodje',
     author_email='michel4j@gmail.com',
