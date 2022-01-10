@@ -20,6 +20,8 @@ class ResponseType:
 
 
 class Request(object):
+    __slots__ = ('client_id', 'request_id', 'method', 'kwargs', 'reply_to')
+
     def __init__(self, client_id: str, request_id: str, method: str, kwargs: dict, reply_to: Queue = None):
         """
         Request object
@@ -86,6 +88,8 @@ class Request(object):
 
 
 class Response(object):
+    __slots__ = ('client_id', 'request_id', 'type', 'content')
+
     def __init__(self, client_id, request_id, response_type, content):
         self.client_id = client_id
         self.request_id = request_id

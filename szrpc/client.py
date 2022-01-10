@@ -12,6 +12,7 @@ from server import ResponseType, Request, Response
 logger = log.get_module_logger(__name__)
 
 
+
 class Client(object):
     def __init__(self, address):
         self.client_id = str(uuid.uuid4())
