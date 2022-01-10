@@ -20,7 +20,7 @@ class ResponseType:
 
 
 class Request(object):
-    def __init__(self, client_id: str, request_id: str, method: str, kwargs: dict):
+    def __init__(self, client_id: str, request_id: str, method: str, kwargs: dict, reply_to: Queue = None):
         """
         Request object
 
@@ -28,11 +28,13 @@ class Request(object):
         :param request_id: request identification
         :param method: remote method to call
         :param kwargs: kwargs
+        :param reply_to:  A queue for responses, defaults to None
         """
         self.client_id = client_id
         self.request_id = request_id
         self.method = method
         self.kwargs = kwargs
+        self.reply_to = reply_to
 
     def parts(self):
         """
@@ -46,34 +48,41 @@ class Request(object):
         ]
 
     @staticmethod
-    def create(client_id: bytes, request_id: bytes, method: bytes, arg_data: bytes):
+    def create(client_id: bytes, request_id: bytes, method: bytes, arg_data: bytes, reply_to: Queue = None):
         """
         Generate a request object from the raw information received through the network
 
-        :param client_id:
-        :param request_id:
-        :param method:
-        :param arg_data:
+        :param client_id:  client identifier
+        :param request_id: request identifier
+        :param method: method name
+        :param arg_data: raw data for the arguments, msgpack encoded bytes
+        :reply_to:  reply queue for responses to be sent to
         :return: new Request object
         """
+        args = msgpack.loads(arg_data)
         return Request(
             client_id.decode('utf-8'),
             request_id.decode('utf-8'),
             method.decode('utf-8'),
-            msgpack.loads(arg_data)
+            args if isinstance(args, dict) else {},
+            reply_to=reply_to
         )
 
     def reply(self, content, response_type:int = ResponseType.REPLY):
         """
-        Generate a response object from the current request
+        Generate a response object from the current request and send it
+        to the reply queue.
 
         :param content: content of the reply
         :param response_type: Response type
         :return: Response object
         """
-        return Response(
+        response = Response(
             self.client_id, self.request_id, response_type, content
         )
+        if self.reply_to is not None:
+            self.reply_to.put(response)
+        return response
 
 
 class Response(object):
@@ -130,39 +139,52 @@ class Response(object):
 
 
 class Service(object):
+    """
+    A base class for all service objects. Service objects carry out the business logic of the server.
+    They can maintain internal state across requests.
+
+    Remote methods have the following requirements:
+    - Must start with "remote__" prefix.
+    - Must accept the request object as the first argument
+    - The rest of the arguments must be keyworded arguments
+
+    A service object can return either a single response or multiple responses per request. This can be implemented by
+    overriding the call_remote method.
+    """
+
     def __init__(self):
         pass
 
-    def call_remote(self, request: Request, reply_to: Queue):
+    def call_remote(self, request: Request):
         """
         Call the remote method in the request and place the response object in the reply queue when ready.
+        This is the main method which is invoked by the server once a request is received. This method will be called
+        in a separate thread for each request.
 
         :param request: Request object
-        :param reply_to: Queue into which results should be placed if any
         """
 
         try:
             method = self.__getattribute__(f'remote__{request.method}')
         except AttributeError:
             logger.error(f'Service does not support remote method "{request.method}"')
-            response = request.reply(
+            request.reply(
                 content=f'Service does not support remote method "{request.method}"',
                 response_type=ResponseType.ERROR,
             )
-            reply_to.put(response)
         else:
-            if request.kwargs:
+            try:
                 logger.debug(f'{request.client_id}: {request.method}(**{request.kwargs})')
-                reply = method(request.kwargs)
-            else:
-                logger.debug(f'{request.client_id}: {request.method}()')
-                reply = method()
-            response = request.reply(content=reply, response_type=ResponseType.REPLY)
-            reply_to.put(response)
+                reply = method(request, **request.kwargs)
+                response_type = ResponseType.REPLY
+            except Exception as e:
+                reply = f'Error: {e}'
+                response_type = ResponseType.ERROR
+            request.reply(content=reply, response_type=response_type)
 
-    def remote__get_api(self):
+    def remote__get_api(self, request):
         """
-        Return information about available remote methods as a dictionary with name: documentation pairs
+        Return the list of allowed remote methods.
         """
         allowed = []
         for attr in dir(self):
@@ -174,7 +196,6 @@ class Service(object):
 class Server(object):
     def __init__(self, service: Service, port: int = 9990):
         """
-
         :param service: A Service class which provides the API for the server
         :param port: Connection request port, the reply port is always the next port, must be available
         """
@@ -197,16 +218,15 @@ class Server(object):
         logger.debug(f'Waiting for requests from "tcp://*:{self.req_port}"...')
         while True:
             req_data = socket.recv_multipart()
-            request = Request.create(*req_data)
+            request = Request.create(*req_data, reply_to=self.replies)
             logger.debug(f'Request received: {request.client_id}|{request.request_id}')
-            thread = Thread(target=self.service.call_remote, args=(request,), kwargs={'reply_to': self.replies}, daemon=True)
+            thread = Thread(target=self.service.call_remote, args=(request,), daemon=True)
             thread.start()
             time.sleep(0.001)
 
     def send_replies(self):
         """
-        Monitor the response queue and publish the replies over the network to
-
+        Monitor the response queue and publish the replies over the network
         """
         context = zmq.Context()
         socket = context.socket(zmq.PUB)

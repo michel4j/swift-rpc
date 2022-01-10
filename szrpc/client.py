@@ -1,11 +1,12 @@
+import re
 import time
 import uuid
 from queue import Queue
 from threading import Thread
-import log
-import pprint
+
 import zmq
-import re
+
+import log
 from server import ResponseType, Request, Response
 
 logger = log.get_module_logger(__name__)
@@ -18,7 +19,7 @@ class Client(object):
         self.url = info['url']
         self.port = int(info['port'])
         self.req_url = f'{self.url}:{self.port}'
-        self.rep_url = f'{self.url}:{self.port+1}'
+        self.rep_url = f'{self.url}:{self.port + 1}'
         self.requests = Queue(maxsize=1000)
         self.start()
 
@@ -28,15 +29,16 @@ class Client(object):
         receiver = Thread(target=self.monitor_responses, daemon=True)
         receiver.start()
 
-    def call_remote(self, method: str, kwargs: dict):
+    def call_remote(self, method: str, kwargs: dict = None):
         request_id = str(uuid.uuid4())
+        kwargs = {} if kwargs is None else kwargs
         self.requests.put(
             Request(self.client_id, request_id, method, kwargs)
         )
         return request_id
 
     def get_api(self):
-        return self.call_remote('get_api', {})
+        return self.call_remote('get_api')
 
     def send_requests(self):
         context = zmq.Context()
@@ -47,7 +49,7 @@ class Client(object):
         while True:
             request = self.requests.get()
             socket.send_multipart(
-               request.parts()
+                request.parts()
             )
             time.sleep(0.001)
 
@@ -76,5 +78,5 @@ if __name__ == '__main__':
     client = Client('tcp://localhost:9990')
     log.log_to_console()
     while True:
-        request_id = client.get_api()
+        req_id = client.get_api()
         time.sleep(1)
