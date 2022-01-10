@@ -29,7 +29,7 @@ class Client(object):
         receiver = Thread(target=self.monitor_responses, daemon=True)
         receiver.start()
 
-    def call_remote(self, method: str, kwargs: dict = None):
+    def call_remote(self, method: str, **kwargs):
         request_id = str(uuid.uuid4())
         kwargs = {} if kwargs is None else kwargs
         self.requests.put(
@@ -75,8 +75,17 @@ class Client(object):
 
 
 if __name__ == '__main__':
-    client = Client('tcp://localhost:9990')
+    class MyClient(Client):
+        def hello_world(self, name='Swift'):
+            return self.call_remote('hello_world', name=name)
+
+        def date(self):
+            return self.call_remote('date')
+
+
+    client = MyClient('tcp://localhost:9990')
     log.log_to_console()
     while True:
         req_id = client.get_api()
+        req_id = client.hello_world()
         time.sleep(1)
