@@ -3,20 +3,21 @@ import re
 from subprocess import CalledProcessError, check_output
 
 
-PACKAGE_DIR = os.path.dirname(__file__)
+PACKAGE_DIR = os.path.dirname(os.path.dirname(__file__))
 
 
-def get_version(prefix='v', package=PACKAGE_DIR):
+def get_version(prefix='v', package=PACKAGE_DIR, name=None):
 
     # Return the version if it has been injected into the file by git-archive
     tag_re = re.compile(rf'\btag: {prefix}([0-9][^,]*)\b')
     version = tag_re.search('$Format:%D$')
-    name = __name__.split('.')[0]
+    name = __name__.split('.')[0] if not name else name
 
     if version:
         return version.group(1)
 
     package_dir = package
+
     if os.path.isdir(os.path.join(package_dir, '.git')):
         # Get the version using "git describe".
         version_cmd = 'git describe --tags --abbrev=0'
