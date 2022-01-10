@@ -10,8 +10,8 @@ with open("README.md", "r", encoding='utf-8') as fh:
 
 
 setup(
-    name='swift-rpc',
-    version=get_version(name='swift-rpc'),
+    name='szrpc',
+    version=get_version(),
     url="https://github.com/michel4j/gepics",
     license='MIT',
     author='Michel Fodje',
