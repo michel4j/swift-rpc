@@ -90,8 +90,8 @@ class Request(object):
 
     def __str__(self):
         h = hashlib.blake2b(digest_size=10)
-        h.update(f'{self.client_id}|{self.client_id}')
-        return f'REQ[{h.hexdigest()}]'
+        h.update(f'{self.client_id}|{self.client_id}'.encode('utf-8'))
+        return f'REQ[{h.hexdigest()}] - {self.method}()'
 
 
 class Response(object):
@@ -150,7 +150,7 @@ class Response(object):
 
     def __str__(self):
         h = hashlib.blake2b(digest_size=10)
-        h.update(f'{self.client_id}|{self.client_id}')
+        h.update(f'{self.client_id}|{self.client_id}'.encode('utf-8'))
         return f'REP[{h.hexdigest()}]'
 
 
@@ -190,7 +190,6 @@ class Service(object):
             )
         else:
             try:
-                logger.debug(f'{request.client_id}: {request.method}(**{request.kwargs})')
                 reply = method(request, **request.kwargs)
                 response_type = ResponseType.DONE
             except Exception as e:
