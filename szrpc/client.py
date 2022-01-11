@@ -9,12 +9,11 @@ import zmq
 
 from . import log
 from .result import Result
-from .server import ResponseType, Request, Response
+from .server import ResponseType, Request, Response, SERVER_TIMEOUT
 
 logger = log.get_module_logger(__name__)
 
 RESULT_CLASS = Result
-SERVER_TIMEOUT = 10  # if no communication occurs from server after 10 seconds, connection is lost.
 
 def use(result_class):
     """
@@ -122,6 +121,10 @@ class Client(object):
                         res.done(response.content)
                     elif response.type == ResponseType.ERROR:
                         res.failure(response.content)
+                if response.type == ResponseType.HEARTBEAT and not self.ready:
+                    logger.info('Connected to Server!')
+                    self.ready = True
+
                 self.last_update = time.time()
             time.sleep(0.01)
 
@@ -145,7 +148,7 @@ class Client(object):
                 time.sleep(0.01)
 
             # check connection
-            if self.ready and time.time() - self.last_update > SERVER_TIMEOUT:
+            if self.ready and time.time() - self.last_update > 2*SERVER_TIMEOUT:
                 self.ready = False
                 logger.error('Server connection lost!')
 

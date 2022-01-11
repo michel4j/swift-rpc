@@ -11,7 +11,7 @@ from . import log
 
 logger = log.get_module_logger(__name__)
 
-HEARTBEAT_INTERVAL = 5
+SERVER_TIMEOUT = 4
 
 
 class ResponseType:
@@ -269,7 +269,7 @@ class Server(object):
                 )
                 logger.debug(f'-> {response}')
                 last_time = time.time()
-            elif time.time() - last_time > HEARTBEAT_INTERVAL:
+            elif time.time() - last_time > SERVER_TIMEOUT:
                 socket.send_multipart(
                     Response.heart_beat()
                 )
