@@ -21,6 +21,14 @@ class ResponseType:
     HEARTBEAT = 4
 
 
+ResponseMessage = {
+    1: 'DONE',
+    2: 'UPDATE',
+    3: 'ERROR',
+    4: 'HEARTBEAT'
+}
+
+
 class Request(object):
     __slots__ = ('client_id', 'request_id', 'method', 'kwargs', 'reply_to')
 
@@ -151,7 +159,7 @@ class Response(object):
     def __str__(self):
         h = hashlib.blake2b(digest_size=10)
         h.update(f'{self.client_id}|{self.client_id}'.encode('utf-8'))
-        return f'REP[{h.hexdigest()}]'
+        return f'REP[{h.hexdigest()}] - {ResponseMessage[self.type]}'
 
 
 class Service(object):
