@@ -205,7 +205,7 @@ class Service(object):
                 response_type = ResponseType.ERROR
             request.reply(content=reply, response_type=response_type)
 
-    def remote__get_api(self, request):
+    def remote__client_config(self, request):
         """
         Called by clients on connect. Return a list of allowed methods to call
         """

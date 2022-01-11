@@ -39,7 +39,7 @@ class Client(object):
         self.req_url = f'{self.url}:{self.port}'
         self.rep_url = f'{self.url}:{self.port + 1}'
         self.requests = Queue(maxsize=1000)
-        self.allowed = ['get_api']
+        self.remote_methods = []
         self.last_update = time.time()
         self.results = {}
         self.ready = False
@@ -55,10 +55,10 @@ class Client(object):
         self.setup(wait=True)
 
     def setup(self, wait=False):
-        res = self.get_api()
+        res = self.client_config()
         if res.wait():
             self.ready = True
-            self.allowed = res.results
+            self.remote_methods = res.results
 
     def call_remote(self, method: str, **kwargs):
         """
@@ -87,7 +87,7 @@ class Client(object):
 
         while True:
             request = self.requests.get()
-            if request.method in self.allowed:
+            if request.method in self.remote_methods + ['client_config']:
                 socket.send_multipart(
                     request.parts()
                 )
@@ -154,7 +154,7 @@ class Client(object):
 
 
     def __getattr__(self, name):
-        if name in self.allowed:
+        if name in self.remote_methods:
             return functools.partial(self.call_remote, name)
         else:
             raise AttributeError(f'{self.__class__.__name__!r} has no attribute {name!r}')
