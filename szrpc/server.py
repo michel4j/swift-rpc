@@ -1,12 +1,13 @@
 import re
 import time
+from datetime import datetime
 from queue import Queue
 from threading import Thread
-from datetime import datetime
+
 import msgpack
 import zmq
 
-import log
+from . import log
 
 logger = log.get_module_logger(__name__)
 
@@ -14,8 +15,8 @@ HEARTBEAT_INTERVAL = 5
 
 
 class ResponseType:
-    REPLY = 1
-    PROGRESS = 2
+    DONE = 1
+    UPDATE = 2
     ERROR = 3
     HEARTBEAT = 4
 
@@ -71,7 +72,7 @@ class Request(object):
             reply_to=reply_to
         )
 
-    def reply(self, content, response_type:int = ResponseType.REPLY):
+    def reply(self, content, response_type: int = ResponseType.DONE):
         """
         Generate a response object from the current request and send it
         to the reply queue.
@@ -181,7 +182,7 @@ class Service(object):
             try:
                 logger.debug(f'{request.client_id}: {request.method}(**{request.kwargs})')
                 reply = method(request, **request.kwargs)
-                response_type = ResponseType.REPLY
+                response_type = ResponseType.DONE
             except Exception as e:
                 reply = f'Error: {e}'
                 response_type = ResponseType.ERROR
@@ -191,6 +192,7 @@ class Service(object):
         """
         Return the list of allowed remote methods.
         """
+        print('remote_api called')
         allowed = []
         for attr in dir(self):
             if attr.startswith('remote__'):
@@ -242,7 +244,7 @@ class Server(object):
             if not self.replies.empty():
                 response = self.replies.get()
                 socket.send_multipart(
-                   response.parts()
+                    response.parts()
                 )
                 logger.debug(f'Response sent: {response.client_id}|{response.request_id}')
                 last_time = time.time()
@@ -252,19 +254,3 @@ class Server(object):
                 )
                 last_time = time.time()
             time.sleep(0.005)
-
-
-if __name__ == '__main__':
-
-    class MyService(Service):
-
-        def remote__hello_world(self, request, name=None):
-            return f'Hello, {name}. How is your world today?'
-
-        def remote__date(self, request):
-            return f"Today's date is {datetime.now()}"
-
-    service = MyService()
-    log.log_to_console()
-    server = Server(service=service, port=9990)
-    server.run()

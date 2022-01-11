@@ -5,18 +5,17 @@ from collections import defaultdict
 
 class SignalObject(object):
     __slots__ = ('signals', 'slots')
-    SIGNALS = ()
 
     def __init__(self):
         self.signals = Queue()
         self.slots = defaultdict(list)
-        print('SignalObject')
 
-    def emission(self):
+    def process(self):
         """
         Run all handlers for one signal from the queue
         :return:
         """
+
         if not self.signals.empty():
             signal, args, kwargs = self.signals.get()
             for slot, xargs, xkwargs in self.slots.get(signal, []):
@@ -30,10 +29,8 @@ class SignalObject(object):
         :param args: arguments
         :param kwargs: keyword arguments
         """
-        if signal in self.SIGNALS:
-            self.signals.put((signal, args, kwargs))
-        else:
-            raise ValueError(f'Invalid signal: "{signal}"')
+        self.signals.put((signal, args, kwargs))
+
 
     def connect(self, signal, slot, *args, **kwargs):
         """
@@ -45,11 +42,8 @@ class SignalObject(object):
         :param kwargs: extra kwargs to pass to the handler
         :return: a connection id (int) which can be used to disconnect the signal
         """
-        if signal in self.SIGNALS:
-            self.slots[signal].append((slot, args, kwargs))
-            return len(self.slots[signal])
-        else:
-            raise ValueError(f'Invalid signal: "{signal}"')
+        self.slots[signal].append((slot, args, kwargs))
+        return len(self.slots[signal])
 
     def disconnect(self, signal, slot, *args, **kwargs):
         """
@@ -66,10 +60,12 @@ class SignalObject(object):
             self.slots[signal].remove((slot, args, kwargs))
 
 
-class ResultMixin(object):
+class Result(SignalObject):
     """
-    Mixin providing methods for managing results
+    Result object oviding methods for managing results
     """
+    __slots__ = ('result_id', 'parts', 'results', 'ready', 'failed', 'errors')
+
     def __init__(self, result_id: str):
         self.result_id = result_id
         self.parts = []
@@ -77,7 +73,7 @@ class ResultMixin(object):
         self.errors = None
         self.ready = False
         self.failed = False
-        print('ResultMixin')
+        super().__init__()
 
     def update(self, info):
         """
@@ -106,7 +102,7 @@ class ResultMixin(object):
         """
         self.results = info if info is not None else self.parts
         self.ready = True
-        self.emit('done')
+        self.emit('done', info)
 
     def is_ready(self) -> bool:
         """
@@ -115,15 +111,8 @@ class ResultMixin(object):
         return self.ready
 
 
-class Result(ResultMixin, SignalObject):
-    """
-    A pure python result object for handling asynchronous results
 
-    """
-    __slots__ = ('result_id', 'parts', 'results', 'ready', 'failed', 'errors')
-    SIGNALS = ('update', 'done', 'failed')
 
-    def __init__(self, result_id: str):
-        ResultMixin.__init__(self, result_id)
-        SignalObject.__init__(self)
+
+
 
