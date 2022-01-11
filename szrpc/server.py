@@ -239,12 +239,12 @@ class Server(object):
         socket = context.socket(zmq.SUB)
         socket.setsockopt_string(zmq.SUBSCRIBE, "")
         socket.bind(f'tcp://*:{self.req_port}')
-        logger.debug(f'Waiting for requests from "tcp://*:{self.req_port}"...')
+        logger.debug(f'<~ "tcp://*:{self.req_port}"...')
         while True:
             req_data = socket.recv_multipart()
             try:
                 request = Request.create(*req_data, reply_to=self.replies)
-                logger.debug(f'Request received: {request}')
+                logger.debug(f'<- {request}')
             except TypeError:
                 logger.error('Invalid request!')
             else:
@@ -259,7 +259,7 @@ class Server(object):
         context = zmq.Context()
         socket = context.socket(zmq.PUB)
         socket.bind(f'tcp://*:{self.rep_port}')
-        logger.debug(f'Sending replies to "tcp://*:{self.rep_port}"...')
+        logger.debug(f'~> "tcp://*:{self.rep_port}"...')
         last_time = 0
         while True:
             if not self.replies.empty():
@@ -267,7 +267,7 @@ class Server(object):
                 socket.send_multipart(
                     response.parts()
                 )
-                logger.debug(f'Response sent: {response}')
+                logger.debug(f'-> {response}')
                 last_time = time.time()
             elif time.time() - last_time > HEARTBEAT_INTERVAL:
                 socket.send_multipart(
