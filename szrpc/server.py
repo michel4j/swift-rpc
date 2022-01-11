@@ -207,7 +207,7 @@ class Service(object):
 
     def remote__get_api(self, request):
         """
-        Return the list of allowed remote methods.
+        Called by clients on connect. Return a list of allowed methods to call
         """
 
         allowed = []

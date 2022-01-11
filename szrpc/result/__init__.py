@@ -1,4 +1,5 @@
-from threading import Thread
+import hashlib
+import time
 from queue import Queue
 from collections import defaultdict
 
@@ -31,7 +32,6 @@ class SignalObject(object):
         """
         self.signals.put((signal, args, kwargs))
 
-
     def connect(self, signal, slot, *args, **kwargs):
         """
         Connect a handler to a given signal
@@ -60,12 +60,7 @@ class SignalObject(object):
             self.slots[signal].remove((slot, args, kwargs))
 
 
-class Result(SignalObject):
-    """
-    Result object oviding methods for managing results
-    """
-    __slots__ = ('result_id', 'parts', 'results', 'ready', 'failed', 'errors')
-
+class ResultMixin(object):
     def __init__(self, result_id: str):
         self.result_id = result_id
         self.parts = []
@@ -110,6 +105,39 @@ class Result(SignalObject):
         Check if the result is ready
         """
         return self.ready or self.failed
+
+    def wait(self, timeout: int = 0):
+        """
+        Wait for result to be ready
+
+        returns
+        :param timeout: int, maximum time to wait, 0 means wait forever.
+        :return: True if result is ready or False if it timed-out.
+        """
+
+        start_time = time.time()
+        while not self.is_ready() and (not timeout or time.time() - start_time < timeout):
+            time.sleep(0.1)
+
+        return self.is_ready()
+
+    def __str__(self):
+        h = hashlib.blake2b(digest_size=10)
+        h.update(f'{self.result_id}'.encode('utf-8'))
+        ready_text = {True: 'Ready', False: 'Not Ready'}[self.ready]
+        error_text = {True: 'Failed', False: ''}[self.ready]
+        return f'REP[{h.hexdigest()}] - {ready_text} {error_text}'
+
+
+class Result(SignalObject, ResultMixin):
+    """
+    Result object oviding methods for managing results
+    """
+    __slots__ = ('result_id', 'parts', 'results', 'ready', 'failed', 'errors')
+
+    def __init__(self, result_id: str):
+        ResultMixin.__init__(self, result_id)
+        super().__init__()
 
 
 

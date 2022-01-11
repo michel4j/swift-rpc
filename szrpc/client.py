@@ -42,6 +42,7 @@ class Client(object):
         self.requests = Queue(maxsize=1000)
         self.allowed = ['get_api']
         self.results = {}
+        self.ready = False
         self.start()
 
     def start(self):
@@ -51,16 +52,13 @@ class Client(object):
         receiver.start()
         emitter = Thread(target=self.emit_results, daemon=True)
         emitter.start()
+        self.setup(wait=True)
 
+    def setup(self, wait=False):
         res = self.get_api()
-        res.connect('done', self.__on_api)
-
-    def __on_api(self, res, apis):
-        """
-        Update API
-        :param res: result object
-        """
-        self.allowed = apis
+        if res.wait():
+            self.ready = True
+            self.allowed = res.results
 
     def call_remote(self, method: str, **kwargs):
         request_id = str(uuid.uuid4())
