@@ -98,7 +98,7 @@ class Request(object):
 
     def __str__(self):
         h = hashlib.blake2b(digest_size=10)
-        h.update(f'{self.client_id}|{self.client_id}'.encode('utf-8'))
+        h.update(f'{self.client_id}|{self.request_id}'.encode('utf-8'))
         return f'REQ[{h.hexdigest()}] - {self.method}()'
 
 
@@ -158,7 +158,7 @@ class Response(object):
 
     def __str__(self):
         h = hashlib.blake2b(digest_size=10)
-        h.update(f'{self.client_id}|{self.client_id}'.encode('utf-8'))
+        h.update(f'{self.client_id}|{self.request_id}'.encode('utf-8'))
         return f'REP[{h.hexdigest()}] - {ResponseMessage[self.type]}'
 
 
