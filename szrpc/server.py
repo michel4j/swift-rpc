@@ -6,7 +6,7 @@ from threading import Thread
 
 import msgpack
 import zmq
-
+import hashlib
 from . import log
 
 logger = log.get_module_logger(__name__)
@@ -88,6 +88,11 @@ class Request(object):
             self.reply_to.put(response)
         return response
 
+    def __str__(self):
+        h = hashlib.blake2b(digest_size=10)
+        h.update(f'{self.client_id}|{self.client_id}')
+        return f'REQ[{h.hexdigest()}]'
+
 
 class Response(object):
     __slots__ = ('client_id', 'request_id', 'type', 'content')
@@ -143,6 +148,11 @@ class Response(object):
             {'time': datetime.now().isoformat()}
         ).parts()
 
+    def __str__(self):
+        h = hashlib.blake2b(digest_size=10)
+        h.update(f'{self.client_id}|{self.client_id}')
+        return f'REP[{h.hexdigest()}]'
+
 
 class Service(object):
     """
@@ -192,7 +202,7 @@ class Service(object):
         """
         Return the list of allowed remote methods.
         """
-        print('remote_api called')
+
         allowed = []
         for attr in dir(self):
             if attr.startswith('remote__'):
@@ -225,10 +235,14 @@ class Server(object):
         logger.debug(f'Waiting for requests from "tcp://*:{self.req_port}"...')
         while True:
             req_data = socket.recv_multipart()
-            request = Request.create(*req_data, reply_to=self.replies)
-            logger.debug(f'Request received: {request.client_id}|{request.request_id}')
-            thread = Thread(target=self.service.call_remote, args=(request,), daemon=True)
-            thread.start()
+            try:
+                request = Request.create(*req_data, reply_to=self.replies)
+                logger.debug(f'Request received: {request}')
+            except TypeError:
+                logger.error('Invalid request!')
+            else:
+                thread = Thread(target=self.service.call_remote, args=(request,), daemon=True)
+                thread.start()
             time.sleep(0.001)
 
     def send_replies(self):
@@ -246,7 +260,7 @@ class Server(object):
                 socket.send_multipart(
                     response.parts()
                 )
-                logger.debug(f'Response sent: {response.client_id}|{response.request_id}')
+                logger.debug(f'Response sent: {response}')
                 last_time = time.time()
             elif time.time() - last_time > HEARTBEAT_INTERVAL:
                 socket.send_multipart(

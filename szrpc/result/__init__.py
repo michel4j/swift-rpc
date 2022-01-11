@@ -92,6 +92,7 @@ class Result(SignalObject):
         """
         self.errors = error
         self.failed = True
+        self.ready = True
         self.emit('failed', error)
 
     def done(self, info=None):
@@ -108,7 +109,7 @@ class Result(SignalObject):
         """
         Check if the result is ready
         """
-        return self.ready
+        return self.ready or self.failed
 
 
 

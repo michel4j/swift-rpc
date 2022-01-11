@@ -1,8 +1,6 @@
 """This module implements utility classes and functions for logging."""
 import logging
-from functools import wraps
 from logging.handlers import RotatingFileHandler
-from reprlib import aRepr
 
 IMPORTANT = 25
 logging.addLevelName(IMPORTANT, 'IMPORTANT')
