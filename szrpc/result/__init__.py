@@ -124,9 +124,13 @@ class ResultMixin(object):
     def __str__(self):
         h = hashlib.blake2b(digest_size=10)
         h.update(f'{self.result_id}'.encode('utf-8'))
-        ready_text = {True: 'Ready', False: 'Not Ready'}[self.ready]
-        error_text = {True: 'Failed', False: ''}[self.ready]
-        return f'REP[{h.hexdigest()}] - {ready_text} {error_text}'
+        ready_text = {
+            (True, False): 'Ready',
+            (False, False): 'Not Ready',
+            (False, True): 'Failed',
+            (True, True): 'Failed',
+        }[(self.ready, self.failed)]
+        return f'REP[{h.hexdigest()}] - {ready_text}'
 
 
 class Result(SignalObject, ResultMixin):

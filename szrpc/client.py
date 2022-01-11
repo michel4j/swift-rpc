@@ -14,7 +14,7 @@ from .server import ResponseType, Request, Response
 logger = log.get_module_logger(__name__)
 
 RESULT_CLASS = Result
-
+SERVER_TIMEOUT = 10  # if no communication occurs from server after 10 seconds, connection is lost.
 
 def use(result_class):
     """
@@ -41,6 +41,7 @@ class Client(object):
         self.rep_url = f'{self.url}:{self.port + 1}'
         self.requests = Queue(maxsize=1000)
         self.allowed = ['get_api']
+        self.last_update = time.time()
         self.results = {}
         self.ready = False
         self.start()
@@ -61,19 +62,29 @@ class Client(object):
             self.allowed = res.results
 
     def call_remote(self, method: str, **kwargs):
+        """
+        Call the remote method on the server
+        :param method: method name
+        :param kwargs: parameters to pass to server
+        :return: Returns a result object for deferred execution.
+        """
         request_id = str(uuid.uuid4())
         kwargs = {} if kwargs is None else kwargs
-        self.requests.put(
-            Request(self.client_id, request_id, method, kwargs)
-        )
+        request = Request(self.client_id, request_id, method, kwargs)
+        self.requests.put(request)
         self.results[request_id] = RESULT_CLASS(request_id)
+        logger.debug(f'-> {request}')
         return self.results[request_id]
 
     def send_requests(self):
+        """
+        Monitors the request queue and sends pending requests to the server
+
+        """
         context = zmq.Context()
         socket = context.socket(zmq.PUB)
         socket.connect(self.req_url)
-        logger.debug(f'Sending requests to {self.req_url}...')
+        logger.debug(f'~> {self.req_url}...')
 
         while True:
             request = self.requests.get()
@@ -83,9 +94,44 @@ class Client(object):
                 )
             time.sleep(0.01)
 
+    def monitor_responses(self):
+        """
+        Fetch responses from the server and updates the result objects
+        """
+        context = zmq.Context()
+        socket = context.socket(zmq.SUB)
+        socket.setsockopt_string(zmq.SUBSCRIBE, self.client_id)
+        socket.setsockopt_string(zmq.SUBSCRIBE, 'heartbeat')
+        socket.connect(self.rep_url)
+        logger.debug(f'<~ {self.rep_url}...')
+
+        while True:
+            reply_data = socket.recv_multipart()
+            try:
+                response = Response.create(*reply_data)
+            except TypeError:
+                logger.error('Invalid response!')
+            else:
+                if response.type != ResponseType.HEARTBEAT:
+                    logger.debug(f'<- {response}')
+                res = self.results.get(response.request_id, None)
+                if res is not None:
+                    if response.type == ResponseType.UPDATE:
+                        res.update(response.content)
+                    elif response.type == ResponseType.DONE:
+                        res.done(response.content)
+                    elif response.type == ResponseType.ERROR:
+                        res.failure(response.content)
+                self.last_update = time.time()
+            time.sleep(0.01)
+
     def emit_results(self):
+        """
+        Triggers pending result signals and cleans-up the results dictionary. Also monitors for connection issues
+        """
         while True:
             expired = set()
+            # process result signals
             for req_id in list(self.results.keys()):
                 res = self.results[req_id]
                 res.process()
@@ -98,28 +144,11 @@ class Client(object):
                 del self.results[req_id]
                 time.sleep(0.01)
 
-    def monitor_responses(self):
-        context = zmq.Context()
-        socket = context.socket(zmq.SUB)
-        socket.setsockopt_string(zmq.SUBSCRIBE, self.client_id)
-        socket.setsockopt_string(zmq.SUBSCRIBE, 'heartbeat')
-        socket.connect(self.rep_url)
-        logger.debug(f'Receiving replies from {self.rep_url}...')
+            # check connection
+            if self.ready and time.time() - self.last_update > SERVER_TIMEOUT:
+                self.ready = False
+                logger.error('Server connection lost!')
 
-        while True:
-            reply_data = socket.recv_multipart()
-            response = Response.create(*reply_data)
-            res = self.results.get(response.request_id, None)
-            if res is not None:
-                if response.type == ResponseType.UPDATE:
-                    res.update(response.content)
-                elif response.type == ResponseType.DONE:
-                    res.done(response.content)
-                elif response.type == ResponseType.ERROR:
-                    res.failure(response.content)
-            elif response.type == ResponseType.HEARTBEAT:
-               self.last_update = time.time()
-            time.sleep(0.01)
 
     def __getattr__(self, name):
         if name in self.allowed:
