@@ -235,8 +235,8 @@ class Server(object):
         context = zmq.Context()
         socket = context.socket(zmq.SUB)
         socket.setsockopt_string(zmq.SUBSCRIBE, "")
-        socket.bind(f'tcp://*:{self.req_port}')
-        logger.info(f'<~ "tcp://*:{self.req_port}"...')
+        socket.bind(f'tcp://0.0.0.0:{self.req_port}')
+        logger.info(f'<~ "tcp://0.0.0.0:{self.req_port}"...')
         while True:
             req_data = socket.recv_multipart()
             try:

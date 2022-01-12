@@ -152,9 +152,8 @@ class Client(object):
                 self.ready = False
                 logger.error('Server connection lost!')
 
-
     def __getattr__(self, name):
-        if name in self.remote_methods:
+        if name == 'client_config' or name in self.remote_methods:
             return functools.partial(self.call_remote, name)
         else:
             raise AttributeError(f'{self.__class__.__name__!r} has no attribute {name!r}')
