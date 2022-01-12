@@ -21,12 +21,21 @@ if __name__ == '__main__':
 
     res = client.signal_strength(
         type='file',
-        directory='/data/Xtal/643',
-        template='A1_2_{:05d}.cbf',
+        directory='/data/Xtal/CLS0026',
+        template='CLS0026-5_{:04d}.cbf',
         first=1,
-        num_frames=315,
+        num_frames=10,
         user_name='michel'
     )
+
+    # res = client.signal_strength(
+    #     type='file',
+    #     directory='/data/Xtal/643',
+    #     template='A1_2_{:05d}.cbf',
+    #     first=1,
+    #     num_frames=15,
+    #     user_name='michel'
+    # )
 
     res.connect('done', on_done)
     res.connect('update', on_update)

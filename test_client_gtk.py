@@ -30,6 +30,7 @@ if __name__ == '__main__':
 
     path = Path(sys.argv[1])
     count = 2
+
     # res = client.process_mx(
     #     directory=f'/tmp/proc-{count}',
     #     file_names=[str(path)],
@@ -42,14 +43,23 @@ if __name__ == '__main__':
     # res.connect('update', on_update)
     # res.connect('failed', on_err)
 
+    # res1 = client.signal_strength(
+    #     type='file',
+    #     directory='/data/Xtal/643',
+    #     template='A1_2_{:05d}.cbf',
+    #     first=1,
+    #     num_frames=1,
+    #     user_name='michel'
+    # )
     res1 = client.signal_strength(
         type='file',
-        directory='/data/Xtal/643',
-        template='A1_2_{:05d}.cbf',
+        directory='/data/Xtal/IDP05511_4noh/data/',
+        template='idp05511_1sm-b_{:03d}.img',
         first=1,
-        num_frames=315,
+        num_frames=10,
         user_name='michel'
     )
+
     res1.connect('done', on_done)
     res1.connect('update', on_update)
     res1.connect('failed', on_err)
