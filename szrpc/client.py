@@ -94,7 +94,6 @@ class Client(object):
             socket.send_multipart(
                 request.parts()
             )
-            print(request.parts())
             time.sleep(0.01)
 
     def monitor_responses(self):
