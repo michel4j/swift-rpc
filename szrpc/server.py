@@ -176,9 +176,6 @@ class Service(object):
     overriding the call_remote method.
     """
 
-    def __init__(self):
-        pass
-
     def call_remote(self, request: Request):
         """
         Call the remote method in the request and place the response object in the reply queue when ready.
@@ -239,12 +236,12 @@ class Server(object):
         socket = context.socket(zmq.SUB)
         socket.setsockopt_string(zmq.SUBSCRIBE, "")
         socket.bind(f'tcp://*:{self.req_port}')
-        logger.debug(f'<~ "tcp://*:{self.req_port}"...')
+        logger.info(f'<~ "tcp://*:{self.req_port}"...')
         while True:
             req_data = socket.recv_multipart()
             try:
                 request = Request.create(*req_data, reply_to=self.replies)
-                logger.debug(f'<- {request}')
+                logger.info(f'<- {request}')
             except TypeError:
                 logger.error('Invalid request!')
             else:
@@ -259,7 +256,7 @@ class Server(object):
         context = zmq.Context()
         socket = context.socket(zmq.PUB)
         socket.bind(f'tcp://*:{self.rep_port}')
-        logger.debug(f'~> "tcp://*:{self.rep_port}"...')
+        logger.info(f'~> "tcp://*:{self.rep_port}"...')
         last_time = 0
         while True:
             if not self.replies.empty():

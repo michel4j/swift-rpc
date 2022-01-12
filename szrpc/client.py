@@ -39,7 +39,7 @@ class Client(object):
         self.req_url = f'{self.url}:{self.port}'
         self.rep_url = f'{self.url}:{self.port + 1}'
         self.requests = Queue(maxsize=1000)
-        self.remote_methods = []
+        self.remote_methods = ['client_config']  # allow config to go through before config is complete
         self.last_update = time.time()
         self.results = {}
         self.ready = False
@@ -87,7 +87,7 @@ class Client(object):
 
         while True:
             request = self.requests.get()
-            if request.method in self.remote_methods + ['client_config']:
+            if request.method in self.remote_methods:
                 socket.send_multipart(
                     request.parts()
                 )
@@ -123,7 +123,7 @@ class Client(object):
                         res.failure(response.content)
                 if response.type == ResponseType.HEARTBEAT and not self.ready:
                     logger.info('Connected to Server!')
-                    self.ready = True
+                    self.setup()
 
                 self.last_update = time.time()
             time.sleep(0.01)
