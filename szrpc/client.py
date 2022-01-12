@@ -56,9 +56,11 @@ class Client(object):
 
     def setup(self, wait=False):
         res = self.client_config()
-        if res.wait():
+        if res.wait(timeout=5):
             self.ready = True
             self.remote_methods = res.results
+        else:
+            self.setup()
 
     def call_remote(self, method: str, **kwargs):
         """
@@ -85,12 +87,14 @@ class Client(object):
         socket.connect(self.req_url)
         logger.debug(f'~> {self.req_url}...')
 
+        time.sleep(2)
+
         while True:
             request = self.requests.get()
-            if request.method in self.remote_methods:
-                socket.send_multipart(
-                    request.parts()
-                )
+            socket.send_multipart(
+                request.parts()
+            )
+            print(request.parts())
             time.sleep(0.01)
 
     def monitor_responses(self):
@@ -123,7 +127,7 @@ class Client(object):
                         res.failure(response.content)
                 if response.type == ResponseType.HEARTBEAT and not self.ready:
                     logger.info('Connected to Server!')
-                    self.setup()
+
 
                 self.last_update = time.time()
             time.sleep(0.01)

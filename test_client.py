@@ -8,7 +8,7 @@ from szrpc.client import Client
 logger = log.get_module_logger('client')
 if __name__ == '__main__':
     log.log_to_console()
-    client = Client('tcp://opi2051-002.clsi.ca:9990')
+    client = Client('tcp://localhost:9990')
 
     def on_done(res, data):
         logger.info(f"{data!r}")
@@ -19,23 +19,23 @@ if __name__ == '__main__':
     def on_update(res, data):
         logger.info(f"{data}")
 
-    res = client.signal_strength(
-        type='file',
-        directory='/data/Xtal/CLS0026',
-        template='CLS0026-5_{:04d}.cbf',
-        first=1,
-        num_frames=10,
-        user_name='michel'
-    )
-
     # res = client.signal_strength(
     #     type='file',
-    #     directory='/data/Xtal/643',
-    #     template='A1_2_{:05d}.cbf',
+    #     directory='/data/Xtal/CLS0026',
+    #     template='CLS0026-5_{:04d}.cbf',
     #     first=1,
-    #     num_frames=15,
+    #     num_frames=10,
     #     user_name='michel'
     # )
+
+    res = client.signal_strength(
+        type='file',
+        directory='/data/Xtal/643',
+        template='A1_2_{:05d}.cbf',
+        first=1,
+        num_frames=15,
+        user_name='michel'
+    )
 
     res.connect('done', on_done)
     res.connect('update', on_update)

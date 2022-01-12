@@ -176,6 +176,12 @@ class Service(object):
     overriding the call_remote method.
     """
 
+    def __init__(self):
+        self.allowed_methods = tuple(
+            re.sub('^remote__', '', attr)
+            for attr in dir(self) if attr.startswith('remote__')
+        )
+
     def call_remote(self, request: Request):
         """
         Call the remote method in the request and place the response object in the reply queue when ready.
@@ -206,12 +212,7 @@ class Service(object):
         """
         Called by clients on connect. Return a list of allowed methods to call
         """
-
-        allowed = []
-        for attr in dir(self):
-            if attr.startswith('remote__'):
-                allowed.append(re.sub('^remote__', '', attr))
-        return allowed
+        return self.allowed_methods
 
 
 class Server(object):
@@ -237,12 +238,13 @@ class Server(object):
         socket.setsockopt_string(zmq.SUBSCRIBE, "")
         socket.bind(f'tcp://0.0.0.0:{self.req_port}')
         logger.info(f'<~ "tcp://0.0.0.0:{self.req_port}"...')
+
         while True:
             req_data = socket.recv_multipart()
             try:
                 request = Request.create(*req_data, reply_to=self.replies)
                 logger.info(f'<- {request}')
-            except TypeError:
+            except Exception:
                 logger.error('Invalid request!')
             else:
                 thread = Thread(target=self.service.call_remote, args=(request,), daemon=True)
@@ -271,4 +273,4 @@ class Server(object):
                     Response.heart_beat()
                 )
                 last_time = time.time()
-            time.sleep(0.005)
+            time.sleep(0.01)

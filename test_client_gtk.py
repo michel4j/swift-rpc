@@ -16,7 +16,7 @@ from gi.repository import Gtk
 
 logger = log.get_module_logger('client')
 if __name__ == '__main__':
-    log.log_to_console(logging.INFO)
+    log.log_to_console()
     client = Client('tcp://localhost:9990')
 
     def on_done(res, data):
