@@ -255,8 +255,8 @@ class Server(object):
         """
         context = zmq.Context()
         socket = context.socket(zmq.PUB)
-        socket.bind(f'tcp://*:{self.rep_port}')
-        logger.info(f'~> "tcp://*:{self.rep_port}"...')
+        socket.bind(f'tcp://0.0.0.0:{self.rep_port}')
+        logger.info(f'~> "tcp://0.0.0.0:{self.rep_port}"...')
         last_time = 0
         while True:
             if not self.replies.empty():
