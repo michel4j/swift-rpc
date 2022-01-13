@@ -124,10 +124,6 @@ class Client(object):
                         res.done(response.content)
                     elif response.type == ResponseType.ERROR:
                         res.failure(response.content)
-                if response.type == ResponseType.HEARTBEAT and not self.ready:
-                    logger.info('Connected to Server!')
-
-
                 self.last_update = time.time()
             time.sleep(0.01)
 
@@ -154,6 +150,7 @@ class Client(object):
             if self.ready and time.time() - self.last_update > 2*SERVER_TIMEOUT:
                 self.ready = False
                 logger.error('Server connection lost!')
+            time.sleep(0.01)
 
     def __getattr__(self, name):
         if name == 'client_config' or name in self.remote_methods:
