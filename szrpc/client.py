@@ -11,7 +11,7 @@ from . import log
 from .result import Result
 from .server import ResponseType, Request, Response, SERVER_TIMEOUT
 
-logger = log.get_module_logger(__name__)
+logger = log.get_module_logger('szrpc')
 
 RESULT_CLASS = Result
 
