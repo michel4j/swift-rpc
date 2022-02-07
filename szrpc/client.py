@@ -52,7 +52,8 @@ class Client(object):
         receiver.start()
         emitter = Thread(target=self.emit_results, daemon=True)
         emitter.start()
-        self.setup(wait=True)
+        setup = Thread(target=self.setup, daemon=True)
+        setup.start()
 
     def setup(self, wait=False):
         res = self.client_config()
