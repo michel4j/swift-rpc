@@ -1,6 +1,6 @@
 import time
-import sys
-from pathlib import Path
+import random
+
 from szrpc import log
 from szrpc.client import Client
 
@@ -19,30 +19,24 @@ if __name__ == '__main__':
     def on_update(res, data):
         logger.info(f"{data}")
 
-    # res = client.signal_strength(
-    #     type='file',
-    #     directory='/data/Xtal/CLS0026',
-    #     template='CLS0026-5_{:04d}.cbf',
-    #     first=1,
-    #     num_frames=10,
-    #     user_name='michel'
-    # )
+    while not client.is_ready():
+        time.sleep(.001)
 
-    # res = client.signal_strength(
-    #     type='file',
-    #     directory='/data/Xtal/643',
-    #     template='A1_2_{:05d}.cbf',
-    #     first=1,
-    #     num_frames=15,
-    #     user_name='michel'
-    # )
+    results = []
+    names = ['Adele', 'Imani', 'Kayla', 'Michel']
+    for i in range(30):
+        if i % 2 == 0:
+            name = random.choice(names)
+            res = client.hello_world(name=name)
+        else:
+            res = client.date()
+        res.connect('done', on_done)
+        res.connect('update', on_update)
+        res.connect('failed', on_err)
+        results.append(res)
+        time.sleep(1)
 
-    res = client.client_config()
-
-    res.connect('done', on_done)
-    res.connect('update', on_update)
-    res.connect('failed', on_err)
-
-    while not res.is_ready():
+    while results:
+        results = [res for res in results if not res.is_ready()]
         time.sleep(0.1)
 

@@ -35,28 +35,25 @@ class Client(object):
         self.client_id = str(uuid.uuid4())
         self.context = zmq.Context()
         self.url = address
-        self.requests = Queue(maxsize=1000)
-        self.remote_methods = ['client_config']  # allow config to go through before config is complete
-        self.last_update = time.time()
+        self.requests = Queue()
+        self.remote_methods = []
         self.results = {}
         self.ready = False
         self.start()
 
     def start(self):
-        sender = Thread(target=self.send_requests, daemon=True)
-        sender.start()
-        emitter = Thread(target=self.emit_results, daemon=True)
-        emitter.start()
-        setup = Thread(target=self.setup, daemon=True)
-        setup.start()
+        Thread(target=self.send_requests, daemon=True).start()
+        Thread(target=self.emit_results, daemon=True).start()
+        res = self.call_remote('client_config')
+        res.connect('done', self.setup)
 
-    def setup(self, wait=False):
-        res = self.client_config()
-        if res.wait(timeout=5):
-            self.ready = True
-            self.remote_methods = res.results
-        else:
-            self.setup()
+    def setup(self, result, data):
+        self.ready = True
+        self.remote_methods = data
+        logger.debug(f'~> {self.url}... Ready!')
+
+    def is_ready(self):
+        return self.ready
 
     def call_remote(self, method: str, **kwargs):
         """
@@ -79,19 +76,18 @@ class Client(object):
 
         """
         socket = self.context.socket(zmq.DEALER)
-        socket.identity = self.client_id.encode('ascii')
+        socket.identity = self.client_id.encode('utf-8')
         socket.connect(self.url)
-        logger.debug(f'~> {self.url}...')
 
         poll = zmq.Poller()
         poll.register(socket, zmq.POLLIN)
 
         while True:
-            sockets = dict(poll.poll(100))
+            sockets = dict(poll.poll(10))
             if socket in sockets:
                 reply_data = socket.recv_multipart()
                 try:
-                    response = Response.create(*reply_data)
+                    response = Response.create(self.client_id.encode('utf-8'), *reply_data)
                 except TypeError:
                     logger.error('Invalid response!')
                 else:
@@ -127,10 +123,6 @@ class Client(object):
                 del self.results[req_id]
                 time.sleep(0.01)
 
-            # check connection
-            if self.ready and time.time() - self.last_update > 2*SERVER_TIMEOUT:
-                self.ready = False
-                logger.error('Server connection lost!')
             time.sleep(0.01)
 
     def __getattr__(self, name):

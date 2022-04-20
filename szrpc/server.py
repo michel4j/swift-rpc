@@ -1,5 +1,6 @@
 import re
 import time
+import uuid
 from datetime import datetime
 
 from threading import Thread
@@ -53,10 +54,10 @@ class Request(object):
         """
         Return the request parts suitable to transmission over network
 
-        :return: a list consisting of [client_id, request_id, method_name, args_data
+        :return: a list consisting of [request_id, method_name, args_data
         """
         return [
-            self.client_id.encode('utf-8'), self.request_id.encode('utf-8'),
+            self.request_id.encode('utf-8'),
             self.method.encode('utf-8'), msgpack.dumps(self.kwargs)
         ]
 
@@ -226,6 +227,7 @@ class Worker(object):
         :param service:  A Service class which provides the API for the server
         :param backend: Backend address to connect to
         """
+        self.identity = str(uuid.uuid4())
         self.service = service
         self.context = zmq.Context()
         self.backend = backend
@@ -234,27 +236,33 @@ class Worker(object):
     def run(self):
         socket = self.context.socket(zmq.DEALER)
         socket.connect(self.backend)
+        poller = zmq.Poller()
+        poller.register(socket, zmq.POLLIN)
 
+        task = None
         while True:
-            req_data = socket.recv_multipart()
-            try:
-                request = Request.create(*req_data, reply_to=self.replies)
-                logger.info(f'<- {request}')
-            except Exception:
-                logger.error('Invalid request!')
-                print(req_data)
-            else:
-                thread = Thread(target=self.service.call_remote, args=(request,), daemon=True)
-                thread.start()
-
+            if task is None:
+                sockets = dict(poller.poll(10))
+                if socket in sockets:
+                    req_data = socket.recv_multipart()
+                    try:
+                        request = Request.create(*req_data, reply_to=self.replies)
+                        logger.info(f'{self.identity} <- {request}')
+                    except Exception:
+                        logger.error('Invalid request!')
+                    else:
+                        task = Thread(target=self.service.call_remote, args=(request,), daemon=True)
+                        task.start()
+            elif task.is_alive() or not self.replies.empty():
                 # block until task completes and reply queue is empty
-                while thread.is_alive() or not self.replies.empty():
-                    if not self.replies.empty():
-                        response = self.replies.get()
-                        socket.send_multipart(response.parts())
-                        logger.debug(f'-> {response}')
-                        last_time = time.time()
-                    time.sleep(0.001)
+                if not self.replies.empty():
+                    response = self.replies.get()
+                    socket.send_multipart(response.parts())
+                    logger.debug(f'-> {response}')
+            elif not task.is_alive():
+                task = None
+
+            time.sleep(0.001)
         socket.close()
 
 
@@ -276,7 +284,6 @@ class Server(object):
         self.backend_addr = f'tcp://*:{port+1}'
         self.num_workers = workers
 
-
     def run(self):
         """
         Listen for requests on the frontend and proxy them to the backend process them. Each request is handled in a separate thread.
@@ -288,9 +295,12 @@ class Server(object):
         backend = context.socket(zmq.DEALER)
         backend.bind(self.backend_addr)
 
+        worker_addr = self.backend_addr.replace('*', 'localhost')
+        logger.info(f'Connecting {self.num_workers} worker(s) to {worker_addr}')
+
         workers = []
         for i in range(self.num_workers):
-            p = Process(target=start_worker, args=(self.service.__class__, self.backend_addr.replace('*', 'localhost')))
+            p = Process(target=start_worker, args=(self.service.__class__, worker_addr))
             p.start()
             workers.append(p)
 
@@ -300,3 +310,25 @@ class Server(object):
         backend.close()
         context.term()
 
+
+class WorkerManager(object):
+    def __init__(self, service: Service, backend: str, workers: int = 1):
+        """
+        :param service:  A Service class which provides the API for the server
+        :param backend: Backend address to connect to
+        :param workers: Number of worker instances to manage
+        """
+        self.service = service
+        self.backend_addr = backend.replace('*', 'localhost')
+        self.num_workers = workers
+
+    def run(self):
+        logger.info(f'Connecting {self.num_workers} worker(s) to {self.backend_addr}')
+        workers = []
+        for i in range(self.num_workers):
+            p = Process(target=start_worker, args=(self.service.__class__, self.backend_addr))
+            p.start()
+            workers.append(p)
+
+        for p in workers:
+            p.join()
