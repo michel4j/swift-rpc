@@ -1,8 +1,9 @@
 import re
 import time
 from datetime import datetime
-from queue import Queue
+
 from threading import Thread
+from multiprocessing import Process, Queue
 
 import msgpack
 import zmq
@@ -215,29 +216,24 @@ class Service(object):
         return self.allowed_methods
 
 
-class Server(object):
-    def __init__(self, service: Service, port: int = 9990):
+class Worker(object):
+    """
+    A worker which manages an instance of the Service. Each work is able to perform the same tasks
+    """
+
+    def __init__(self, service: Service, backend: str):
         """
-        :param service: A Service class which provides the API for the server
-        :param port: Connection request port, the reply port is always the next port, must be available
+        :param service:  A Service class which provides the API for the server
+        :param backend: Backend address to connect to
         """
         self.service = service
-        self.req_port = port
-        self.rep_port = port + 1
-        self.replies = Queue(maxsize=2000)
-
-        reply_thread = Thread(target=self.send_replies, daemon=True)
-        reply_thread.start()
+        self.context = zmq.Context()
+        self.backend = backend
+        self.replies = Queue()
 
     def run(self):
-        """
-        Listen for requests and process them. Each request is handled in a separate thread.
-        """
-        context = zmq.Context()
-        socket = context.socket(zmq.SUB)
-        socket.setsockopt_string(zmq.SUBSCRIBE, "")
-        socket.bind(f'tcp://0.0.0.0:{self.req_port}')
-        logger.info(f'<~ "tcp://0.0.0.0:{self.req_port}"...')
+        socket = self.context.socket(zmq.DEALER)
+        socket.connect(self.backend)
 
         while True:
             req_data = socket.recv_multipart()
@@ -246,31 +242,61 @@ class Server(object):
                 logger.info(f'<- {request}')
             except Exception:
                 logger.error('Invalid request!')
+                print(req_data)
             else:
                 thread = Thread(target=self.service.call_remote, args=(request,), daemon=True)
                 thread.start()
-            time.sleep(0.001)
 
-    def send_replies(self):
+                # block until task completes and reply queue is empty
+                while thread.is_alive() or not self.replies.empty():
+                    if not self.replies.empty():
+                        response = self.replies.get()
+                        socket.send_multipart(response.parts())
+                        logger.debug(f'-> {response}')
+                        last_time = time.time()
+                    time.sleep(0.001)
+        socket.close()
+
+
+def start_worker(service_class, backend, *args, **kwargs):
+    service = service_class(*args, **kwargs)
+    worker = Worker(service, backend)
+    return worker.run()
+
+
+class Server(object):
+    def __init__(self, service: Service, port: int = 9990, workers: int = 1):
         """
-        Monitor the response queue and publish the replies over the network
+        :param service: A Service class which provides the API for the server
+        :param port: Connection request port, the reply port is always the next port, must be available
+        :param workers: Number of workers to start on server. Additional workers can be started on other hosts
+        """
+        self.service = service
+        self.frontend_addr = f'tcp://*:{port}'
+        self.backend_addr = f'tcp://*:{port+1}'
+        self.num_workers = workers
+
+
+    def run(self):
+        """
+        Listen for requests on the frontend and proxy them to the backend process them. Each request is handled in a separate thread.
         """
         context = zmq.Context()
-        socket = context.socket(zmq.PUB)
-        socket.bind(f'tcp://0.0.0.0:{self.rep_port}')
-        logger.info(f'~> "tcp://0.0.0.0:{self.rep_port}"...')
-        last_time = 0
-        while True:
-            if not self.replies.empty():
-                response = self.replies.get()
-                socket.send_multipart(
-                    response.parts()
-                )
-                logger.debug(f'-> {response}')
-                last_time = time.time()
-            elif time.time() - last_time > SERVER_TIMEOUT:
-                socket.send_multipart(
-                    Response.heart_beat()
-                )
-                last_time = time.time()
-            time.sleep(0.01)
+        frontend = context.socket(zmq.ROUTER)
+        frontend.bind(self.frontend_addr)
+
+        backend = context.socket(zmq.DEALER)
+        backend.bind(self.backend_addr)
+
+        workers = []
+        for i in range(self.num_workers):
+            p = Process(target=start_worker, args=(self.service.__class__, self.backend_addr.replace('*', 'localhost')))
+            p.start()
+            workers.append(p)
+
+        zmq.proxy(frontend, backend)
+
+        frontend.close()
+        backend.close()
+        context.term()
+

@@ -33,11 +33,8 @@ class Client(object):
 
     def __init__(self, address):
         self.client_id = str(uuid.uuid4())
-        info = re.match(r'^(?P<url>...://[^:]+):(?P<port>\d+)$', address).groupdict()
-        self.url = info['url']
-        self.port = int(info['port'])
-        self.req_url = f'{self.url}:{self.port}'
-        self.rep_url = f'{self.url}:{self.port + 1}'
+        self.context = zmq.Context()
+        self.url = address
         self.requests = Queue(maxsize=1000)
         self.remote_methods = ['client_config']  # allow config to go through before config is complete
         self.last_update = time.time()
@@ -48,8 +45,6 @@ class Client(object):
     def start(self):
         sender = Thread(target=self.send_requests, daemon=True)
         sender.start()
-        receiver = Thread(target=self.monitor_responses, daemon=True)
-        receiver.start()
         emitter = Thread(target=self.emit_results, daemon=True)
         emitter.start()
         setup = Thread(target=self.setup, daemon=True)
@@ -83,50 +78,35 @@ class Client(object):
         Monitors the request queue and sends pending requests to the server
 
         """
-        context = zmq.Context()
-        socket = context.socket(zmq.PUB)
-        socket.connect(self.req_url)
-        logger.debug(f'~> {self.req_url}...')
+        socket = self.context.socket(zmq.DEALER)
+        socket.identity = self.client_id.encode('ascii')
+        socket.connect(self.url)
+        logger.debug(f'~> {self.url}...')
 
-        time.sleep(2)
-
-        while True:
-            request = self.requests.get()
-            socket.send_multipart(
-                request.parts()
-            )
-            time.sleep(0.01)
-
-    def monitor_responses(self):
-        """
-        Fetch responses from the server and updates the result objects
-        """
-        context = zmq.Context()
-        socket = context.socket(zmq.SUB)
-        socket.setsockopt_string(zmq.SUBSCRIBE, self.client_id)
-        socket.setsockopt_string(zmq.SUBSCRIBE, 'heartbeat')
-        socket.connect(self.rep_url)
-        logger.debug(f'<~ {self.rep_url}...')
+        poll = zmq.Poller()
+        poll.register(socket, zmq.POLLIN)
 
         while True:
-            reply_data = socket.recv_multipart()
-            try:
-                response = Response.create(*reply_data)
-            except TypeError:
-                logger.error('Invalid response!')
-            else:
-                if response.type != ResponseType.HEARTBEAT:
+            sockets = dict(poll.poll(100))
+            if socket in sockets:
+                reply_data = socket.recv_multipart()
+                try:
+                    response = Response.create(*reply_data)
+                except TypeError:
+                    logger.error('Invalid response!')
+                else:
                     logger.debug(f'<- {response}')
-                res = self.results.get(response.request_id, None)
-                if res is not None:
-                    if response.type == ResponseType.UPDATE:
-                        res.update(response.content)
-                    elif response.type == ResponseType.DONE:
-                        res.done(response.content)
-                    elif response.type == ResponseType.ERROR:
-                        res.failure(response.content)
-                self.last_update = time.time()
-            time.sleep(0.01)
+                    res = self.results.get(response.request_id, None)
+                    if res is not None:
+                        if response.type == ResponseType.UPDATE:
+                            res.update(response.content)
+                        elif response.type == ResponseType.DONE:
+                            res.done(response.content)
+                        elif response.type == ResponseType.ERROR:
+                            res.failure(response.content)
+            if not self.requests.empty():
+                request = self.requests.get()
+                socket.send_multipart(request.parts())
 
     def emit_results(self):
         """

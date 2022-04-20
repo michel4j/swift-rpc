@@ -28,14 +28,16 @@ if __name__ == '__main__':
     #     user_name='michel'
     # )
 
-    res = client.signal_strength(
-        type='file',
-        directory='/data/Xtal/643',
-        template='A1_2_{:05d}.cbf',
-        first=1,
-        num_frames=15,
-        user_name='michel'
-    )
+    # res = client.signal_strength(
+    #     type='file',
+    #     directory='/data/Xtal/643',
+    #     template='A1_2_{:05d}.cbf',
+    #     first=1,
+    #     num_frames=15,
+    #     user_name='michel'
+    # )
+
+    res = client.client_config()
 
     res.connect('done', on_done)
     res.connect('update', on_update)
