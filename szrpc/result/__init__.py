@@ -61,7 +61,7 @@ class SignalObject(object):
 
 
 class ResultMixin(object):
-    def __init__(self, result_id: str):
+    def __init__(self, result_id: bytes):
         self.result_id = result_id
         self.parts = []
         self.results = None
@@ -122,15 +122,14 @@ class ResultMixin(object):
         return self.is_ready()
 
     def __str__(self):
-        h = hashlib.blake2b(digest_size=10)
-        h.update(f'{self.result_id}'.encode('utf-8'))
+        token = self.result_id.decode('ascii')[:4]
         ready_text = {
             (True, False): 'Ready',
             (False, False): 'Not Ready',
             (False, True): 'Failed',
             (True, True): 'Failed',
         }[(self.ready, self.failed)]
-        return f'REP[{h.hexdigest()}] - {ready_text}'
+        return f'rep[{token}..] - {ready_text}'
 
 
 class Result(SignalObject, ResultMixin):
@@ -139,7 +138,7 @@ class Result(SignalObject, ResultMixin):
     """
     __slots__ = ('result_id', 'parts', 'results', 'ready', 'failed', 'errors')
 
-    def __init__(self, result_id: str):
+    def __init__(self, result_id: bytes):
         ResultMixin.__init__(self, result_id)
         super().__init__()
 

@@ -1,6 +1,7 @@
 import re
 import time
 import uuid
+import base64
 from datetime import datetime
 
 from threading import Thread
@@ -8,7 +9,6 @@ from multiprocessing import Process, Queue
 
 import msgpack
 import zmq
-import hashlib
 from . import log
 
 logger = log.get_module_logger(__name__)
@@ -31,10 +31,17 @@ ResponseMessage = {
 }
 
 
+def short_uuid():
+    """
+    Generate a 22 character UUID4 representation
+    """
+    return base64.b64encode(uuid.uuid4().bytes).strip(b'=')
+
+
 class Request(object):
     __slots__ = ('client_id', 'request_id', 'method', 'kwargs', 'reply_to')
 
-    def __init__(self, client_id: str, request_id: str, method: str, kwargs: dict, reply_to: Queue = None):
+    def __init__(self, client_id: bytes, request_id: bytes, method: str, kwargs: dict, reply_to: Queue = None):
         """
         Request object
 
@@ -57,7 +64,7 @@ class Request(object):
         :return: a list consisting of [request_id, method_name, args_data
         """
         return [
-            self.request_id.encode('utf-8'),
+            self.request_id,
             self.method.encode('utf-8'), msgpack.dumps(self.kwargs)
         ]
 
@@ -75,8 +82,8 @@ class Request(object):
         """
         args = msgpack.loads(arg_data)
         return Request(
-            client_id.decode('utf-8'),
-            request_id.decode('utf-8'),
+            client_id,
+            request_id,
             method.decode('utf-8'),
             args if isinstance(args, dict) else {},
             reply_to=reply_to
@@ -99,9 +106,9 @@ class Request(object):
         return response
 
     def __str__(self):
-        h = hashlib.blake2b(digest_size=10)
-        h.update(f'{self.client_id}|{self.request_id}'.encode('utf-8'))
-        return f'REQ[{h.hexdigest()}] - {self.method}()'
+        return "req[{}..:{}..] - {}()".format(
+            self.client_id[:5].decode("utf-8"), self.request_id[:5].decode("utf-8"), self.method
+        )
 
 
 class Response(object):
@@ -120,7 +127,7 @@ class Response(object):
         :return: a list consisting of [client_id, request_id, response_type, response_data
         """
         return [
-            self.client_id.encode('utf-8'), self.request_id.encode('utf-8'),
+            self.client_id, self.request_id,
             msgpack.dumps(self.type), msgpack.dumps(self.content)
         ]
 
@@ -136,8 +143,8 @@ class Response(object):
         :return: new Response object
         """
         return Response(
-            client_id.decode('utf-8'),
-            request_id.decode('utf-8'),
+            client_id,
+            request_id,
             msgpack.loads(response_type),
             msgpack.loads(content)
         )
@@ -159,9 +166,9 @@ class Response(object):
         ).parts()
 
     def __str__(self):
-        h = hashlib.blake2b(digest_size=10)
-        h.update(f'{self.client_id}|{self.request_id}'.encode('utf-8'))
-        return f'REP[{h.hexdigest()}] - {ResponseMessage[self.type]}'
+        return "rep[{}..:{}..] - {}".format(
+            self.client_id[:5].decode("utf-8"), self.request_id[:5].decode("utf-8"), ResponseMessage[self.type]
+        )
 
 
 class Service(object):
@@ -227,7 +234,7 @@ class Worker(object):
         :param service:  A Service class which provides the API for the server
         :param backend: Backend address to connect to
         """
-        self.identity = str(uuid.uuid4())
+        self.identity = short_uuid()
         self.service = service
         self.context = zmq.Context()
         self.backend = backend
@@ -235,21 +242,23 @@ class Worker(object):
 
     def run(self):
         socket = self.context.socket(zmq.DEALER)
+        socket.identity = self.identity
         socket.connect(self.backend)
-        poller = zmq.Poller()
-        poller.register(socket, zmq.POLLIN)
+
+        if socket.poll(None, zmq.POLLOUT):
+            socket.send_multipart([b'READY'])
 
         task = None
         while True:
             if task is None:
-                sockets = dict(poller.poll(10))
-                if socket in sockets:
+                if socket.poll(10, zmq.POLLIN):
                     req_data = socket.recv_multipart()
                     try:
                         request = Request.create(*req_data, reply_to=self.replies)
-                        logger.info(f'{self.identity} <- {request}')
+                        logger.info(f'<- {request}')
                     except Exception:
                         logger.error('Invalid request!')
+                        print(req_data)
                     else:
                         task = Thread(target=self.service.call_remote, args=(request,), daemon=True)
                         task.start()
@@ -263,70 +272,115 @@ class Worker(object):
                 task = None
 
             time.sleep(0.001)
-        socket.close()
 
 
-def start_worker(service_class, backend, *args, **kwargs):
-    service = service_class(*args, **kwargs)
+def start_worker(service, backend):
     worker = Worker(service, backend)
     return worker.run()
 
 
 class Server(object):
-    def __init__(self, service: Service, port: int = 9990, workers: int = 1):
+    def __init__(self, service: Service, ports: tuple = (9990, 9991), instances: int = 1):
         """
         :param service: A Service class which provides the API for the server
-        :param port: Connection request port, the reply port is always the next port, must be available
-        :param workers: Number of workers to start on server. Additional workers can be started on other hosts
+        :param ports: pair of ports for frontend and backend
+        :param instances: Number of workers to start on server. Additional workers can be started on other hosts
         """
         self.service = service
-        self.frontend_addr = f'tcp://*:{port}'
-        self.backend_addr = f'tcp://*:{port+1}'
-        self.num_workers = workers
+        self.frontend_addr = f'tcp://*:{ports[0]}'
+        self.backend_addr = f'tcp://*:{ports[1]}'
+        self.instances = instances
+        self.context = zmq.Context()
 
-    def run(self):
+    def start_workers(self):
+        worker_addr = self.backend_addr.replace('*', 'localhost')
+        processes = []
+        logger.info(f'Connecting {self.instances} worker(s) to {worker_addr}')
+        for i in range(self.instances):
+            p = Process(target=start_worker, args=(self.service, worker_addr))
+            p.start()
+            processes.append(p)
+
+    def run(self, load_balancing=False):
         """
         Listen for requests on the frontend and proxy them to the backend process them. Each request is handled in a separate thread.
         """
-        context = zmq.Context()
-        frontend = context.socket(zmq.ROUTER)
-        frontend.bind(self.frontend_addr)
+        if load_balancing:
+            self.load_balancing_proxy()
+        else:
+            self.simple_proxy()
 
-        backend = context.socket(zmq.DEALER)
+    def simple_proxy(self):
+        frontend = self.context.socket(zmq.ROUTER)
+        backend = self.context.socket(zmq.DEALER)
+        frontend.bind(self.frontend_addr)
         backend.bind(self.backend_addr)
 
-        worker_addr = self.backend_addr.replace('*', 'localhost')
-        logger.info(f'Connecting {self.num_workers} worker(s) to {worker_addr}')
-
-        workers = []
-        for i in range(self.num_workers):
-            p = Process(target=start_worker, args=(self.service.__class__, worker_addr))
-            p.start()
-            workers.append(p)
+        self.start_workers()
 
         zmq.proxy(frontend, backend)
 
         frontend.close()
         backend.close()
-        context.term()
+
+    def load_balancing_proxy(self):
+        frontend = self.context.socket(zmq.ROUTER)
+        backend = self.context.socket(zmq.ROUTER)
+        frontend.bind(self.frontend_addr)
+        backend.bind(self.backend_addr)
+
+        self.start_workers()
+
+        poller = zmq.Poller()
+        poller.register(backend, zmq.POLLIN)
+        workers = []
+        backend_ready = False
+
+        while True:
+            sockets = dict(poller.poll())
+
+            if backend in sockets:
+                # Handle worker activity on the backend
+                replies = backend.recv_multipart()
+                worker = replies[0]
+                workers.append(worker)
+                if workers and not backend_ready:
+                    # Poll for clients now that a worker is available and backend was not ready
+                    poller.register(frontend, zmq.POLLIN)
+                    backend_ready = True
+                if len(replies) > 2:
+                    frontend.send_multipart(replies[1:])
+
+            if frontend in sockets:
+                # Get next client request, route to last-used worker
+                request = frontend.recv_multipart()
+                worker = workers.pop(0)
+                backend.send_multipart([worker] + request)
+                if not workers:
+                    # Don't poll clients if no workers are available and set backend_ready flag to false
+                    poller.unregister(frontend)
+                    backend_ready = False
+
+        frontend.close()
+        backend.close()
 
 
 class WorkerManager(object):
-    def __init__(self, service: Service, backend: str, workers: int = 1):
+    def __init__(self, service: Service, backend: str, instances: int = 1):
         """
         :param service:  A Service class which provides the API for the server
         :param backend: Backend address to connect to
-        :param workers: Number of worker instances to manage
+        :param instances: Number of worker instances to manage
         """
         self.service = service
         self.backend_addr = backend.replace('*', 'localhost')
-        self.num_workers = workers
+        self.instances = instances
 
     def run(self):
-        logger.info(f'Connecting {self.num_workers} worker(s) to {self.backend_addr}')
+        logger.info(f'Connecting {self.instances} worker(s) to {self.backend_addr}')
         workers = []
-        for i in range(self.num_workers):
-            p = Process(target=start_worker, args=(self.service.__class__, self.backend_addr))
+        for i in range(self.instances):
+            p = Process(target=start_worker, args=(self.service, self.backend_addr))
             p.start()
             workers.append(p)
 

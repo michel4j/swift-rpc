@@ -23,9 +23,9 @@ if __name__ == '__main__':
         time.sleep(.001)
 
     results = []
-    names = ['Adele', 'Imani', 'Kayla', 'Michel']
-    for i in range(30):
-        if i % 2 == 0:
+    names = ['Joe', 'Jim', 'Janay', 'John']
+    for i in range(100):
+        if i % 3 == 0:
             name = random.choice(names)
             res = client.hello_world(name=name)
         else:
@@ -34,7 +34,7 @@ if __name__ == '__main__':
         res.connect('update', on_update)
         res.connect('failed', on_err)
         results.append(res)
-        time.sleep(1)
+        time.sleep(.05)
 
     while results:
         results = [res for res in results if not res.is_ready()]

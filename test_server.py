@@ -18,5 +18,5 @@ class MyService(Service):
 if __name__ == '__main__':
     service = MyService()
     log.log_to_console()
-    server = Server(service=service, port=9990, workers=2)
-    server.run()
+    server = Server(service=service, ports=(9990, 9991), instances=1)
+    server.run(load_balancing=True)

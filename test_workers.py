@@ -8,5 +8,5 @@ if __name__ == '__main__':
 
     service = MyService()
     log.log_to_console()
-    server = WorkerManager(service=service, backend="tcp://localhost:9991", workers=2)
+    server = WorkerManager(service=service, backend="tcp://localhost:9991", instances=1)
     server.run()

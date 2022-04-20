@@ -1,7 +1,5 @@
 import functools
-import re
 import time
-import uuid
 from queue import Queue
 from threading import Thread
 
@@ -9,11 +7,12 @@ import zmq
 
 from . import log
 from .result import Result
-from .server import ResponseType, Request, Response, SERVER_TIMEOUT
+from .server import ResponseType, Request, Response, SERVER_TIMEOUT, short_uuid
 
 logger = log.get_module_logger('szrpc')
 
 RESULT_CLASS = Result
+
 
 def use(result_class):
     """
@@ -32,13 +31,14 @@ class Client(object):
     """
 
     def __init__(self, address):
-        self.client_id = str(uuid.uuid4())
+        self.client_id = short_uuid()
         self.context = zmq.Context()
         self.url = address
         self.requests = Queue()
         self.remote_methods = []
         self.results = {}
         self.ready = False
+        self.last_available = time.time()
         self.start()
 
     def start(self):
@@ -62,7 +62,7 @@ class Client(object):
         :param kwargs: parameters to pass to server
         :return: Returns a result object for deferred execution.
         """
-        request_id = str(uuid.uuid4())
+        request_id = short_uuid()
         kwargs = {} if kwargs is None else kwargs
         request = Request(self.client_id, request_id, method, kwargs)
         self.requests.put(request)
@@ -76,20 +76,17 @@ class Client(object):
 
         """
         socket = self.context.socket(zmq.DEALER)
-        socket.identity = self.client_id.encode('utf-8')
+        socket.identity = self.client_id
         socket.connect(self.url)
 
-        poll = zmq.Poller()
-        poll.register(socket, zmq.POLLIN)
-
         while True:
-            sockets = dict(poll.poll(10))
-            if socket in sockets:
+            if socket.poll(10, zmq.POLLIN):
                 reply_data = socket.recv_multipart()
                 try:
-                    response = Response.create(self.client_id.encode('utf-8'), *reply_data)
+                    response = Response.create(self.client_id, *reply_data)
                 except TypeError:
                     logger.error('Invalid response!')
+                    print(reply_data)
                 else:
                     logger.debug(f'<- {response}')
                     res = self.results.get(response.request_id, None)
@@ -100,9 +97,11 @@ class Client(object):
                             res.done(response.content)
                         elif response.type == ResponseType.ERROR:
                             res.failure(response.content)
-            if not self.requests.empty():
-                request = self.requests.get()
-                socket.send_multipart(request.parts())
+            if socket.poll(10, zmq.POLLOUT):
+                self.last_available = time.time()
+                if not self.requests.empty():
+                    request = self.requests.get()
+                    socket.send_multipart(request.parts())
 
     def emit_results(self):
         """
@@ -123,6 +122,10 @@ class Client(object):
                 del self.results[req_id]
                 time.sleep(0.01)
 
+            # check connection
+            if self.is_ready() and time.time() - self.last_available > 2*SERVER_TIMEOUT:
+                self.ready = False
+                logger.error('Server connection lost!')
             time.sleep(0.01)
 
     def __getattr__(self, name):
