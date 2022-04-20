@@ -39,7 +39,7 @@ def short_uuid():
 
 
 class Request(object):
-    __slots__ = ('client_id', 'request_id', 'method', 'kwargs', 'reply_to')
+    __slots__ = ('client_id', 'request_id', 'method', 'kwargs', 'reply_to', 'identity')
 
     def __init__(self, client_id: bytes, request_id: bytes, method: str, kwargs: dict, reply_to: Queue = None):
         """
@@ -53,6 +53,7 @@ class Request(object):
         """
         self.client_id = client_id
         self.request_id = request_id
+        self.identity = request_id.decode('utf-8')
         self.method = method
         self.kwargs = kwargs
         self.reply_to = reply_to
@@ -112,13 +113,14 @@ class Request(object):
 
 
 class Response(object):
-    __slots__ = ('client_id', 'request_id', 'type', 'content')
+    __slots__ = ('client_id', 'request_id', 'type', 'content', 'identity')
 
     def __init__(self, client_id, request_id, response_type, content):
         self.client_id = client_id
         self.request_id = request_id
         self.type = response_type
         self.content = content
+        self.identity = request_id.decode('utf-8')
 
     def parts(self):
         """
