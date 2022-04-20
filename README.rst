@@ -50,9 +50,9 @@ The following  example illustrates how simple it is to create one.
             return f"Today's date is {datetime.now()}"
 
         def remote__progress(self, request):
-            for i in range(100):
-                time.sleep(0.001)
-                request.reply(f'{i}% complete')
+            for i in range(10):
+                time.sleep(0.1)
+                request.reply(f'{i*10}% complete')
             return f"Progress done"
 
 

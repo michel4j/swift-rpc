@@ -15,6 +15,13 @@ class MyService(Service):
         time.sleep(1)
         return f"Today's date is {datetime.now()}"
 
+    def remote__progress(self, request):
+        for i in range(10):
+            request.reply(f'{i*10}% complete')
+            time.sleep(0.1)
+        return f"Progress done"
+
+
 if __name__ == '__main__':
     service = MyService()
     log.log_to_console()

@@ -150,17 +150,14 @@ class Response(object):
         )
 
     @staticmethod
-    def heart_beat():
+    def heartbeat():
         """
-        Generate a heartbeat response network
-
-        :param response_type:
-        :param response_type:
+        Generate a heartbeat response packet
         :return: new Response object
         """
         return Response(
-            'heartbeat',
-            '',
+            b'',
+            b'heartbeat',
             ResponseType.HEARTBEAT,
             {'time': datetime.now().isoformat()}
         ).parts()
@@ -246,7 +243,7 @@ class Worker(object):
         socket.connect(self.backend)
 
         if socket.poll(None, zmq.POLLOUT):
-            socket.send_multipart([b'READY'])
+            socket.send_multipart(Response.heartbeat())
 
         task = None
         while True:
@@ -341,15 +338,20 @@ class Server(object):
 
             if backend in sockets:
                 # Handle worker activity on the backend
-                replies = backend.recv_multipart()
-                worker = replies[0]
-                workers.append(worker)
+                reply = backend.recv_multipart()
+                worker = reply[0]
+
+                response = Response.create(*reply[1:])
+
+                if response.type in [ResponseType.DONE, ResponseType.ERROR, ResponseType.HEARTBEAT]:
+                    workers.append(worker)
+
                 if workers and not backend_ready:
                     # Poll for clients now that a worker is available and backend was not ready
                     poller.register(frontend, zmq.POLLIN)
                     backend_ready = True
-                if len(replies) > 2:
-                    frontend.send_multipart(replies[1:])
+                if response.type != ResponseType.HEARTBEAT:
+                    frontend.send_multipart(response.parts())
 
             if frontend in sockets:
                 # Get next client request, route to last-used worker

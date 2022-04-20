@@ -24,12 +24,16 @@ if __name__ == '__main__':
 
     results = []
     names = ['Joe', 'Jim', 'Janay', 'John']
-    for i in range(100):
-        if i % 3 == 0:
+    for i in range(10):
+        c = random.choice([0, 1, 2])
+        if c == 0:
             name = random.choice(names)
             res = client.hello_world(name=name)
-        else:
+        elif c == 1:
             res = client.date()
+        elif c == 2:
+            res = client.progress()
+
         res.connect('done', on_done)
         res.connect('update', on_update)
         res.connect('failed', on_err)
