@@ -82,7 +82,7 @@ class Request(object):
             reply_to=reply_to
         )
 
-    def reply(self, content, response_type: int = ResponseType.DONE):
+    def reply(self, content, response_type: int = ResponseType.UPDATE):
         """
         Generate a response object from the current request and send it
         to the reply queue.

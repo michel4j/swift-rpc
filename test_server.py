@@ -7,7 +7,7 @@ from szrpc.server import Server, Service, ResponseType
 class MyService(Service):
 
     def remote__hello_world(self, request, name=None):
-        request.reply(f'Please wait, {name}. This will take a while.', ResponseType.UPDATE)
+        request.reply(f'Please wait, {name}. This will take a while.')
         time.sleep(10)
         return f'Hello, {name}. How is your world today?'
 
