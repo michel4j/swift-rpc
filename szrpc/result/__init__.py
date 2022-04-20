@@ -122,7 +122,7 @@ class ResultMixin(object):
         return self.is_ready()
 
     def __str__(self):
-        token = self.result_id.decode('ascii')[:4]
+        token = self.result_id.decode('utf-8')[:4]
         ready_text = {
             (True, False): 'Ready',
             (False, False): 'Not Ready',
