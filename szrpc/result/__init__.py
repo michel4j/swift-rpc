@@ -62,6 +62,7 @@ class SignalObject(object):
 
 class ResultMixin(object):
     def __init__(self, result_id: bytes):
+        self.identity = result_id.decode('utf-8')
         self.result_id = result_id
         self.parts = []
         self.results = None
@@ -122,7 +123,7 @@ class ResultMixin(object):
         return self.is_ready()
 
     def __str__(self):
-        token = self.result_id.decode('utf-8')[:4]
+        token = self.identity[:4]
         ready_text = {
             (True, False): 'Ready',
             (False, False): 'Not Ready',
@@ -136,7 +137,7 @@ class Result(SignalObject, ResultMixin):
     """
     Result object oviding methods for managing results
     """
-    __slots__ = ('result_id', 'parts', 'results', 'ready', 'failed', 'errors')
+    __slots__ = ('identity', 'parts', 'results', 'ready', 'failed', 'errors')
 
     def __init__(self, result_id: bytes):
         ResultMixin.__init__(self, result_id)
