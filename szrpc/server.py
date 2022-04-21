@@ -257,7 +257,6 @@ class Worker(object):
                         logger.info(f'<- {request}')
                     except Exception:
                         logger.error('Invalid request!')
-                        print(req_data)
                     else:
                         task = Thread(target=self.service.call_remote, args=(request,), daemon=True)
                         task.start()

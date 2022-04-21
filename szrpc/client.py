@@ -86,7 +86,6 @@ class Client(object):
                     response = Response.create(self.client_id, *reply_data)
                 except TypeError:
                     logger.error('Invalid response!')
-                    print(reply_data)
                 else:
                     logger.debug(f'<- {response}')
                     res = self.results.get(response.request_id, None)
