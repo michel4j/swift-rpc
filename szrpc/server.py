@@ -14,7 +14,8 @@ from . import log
 logger = log.get_module_logger(__name__)
 
 SERVER_TIMEOUT = 4
-
+MIN_HEARTBEAT_INTERVAL = 1
+MAX_HEARTBEAT_INTERVAL = 2
 
 class ResponseType:
     DONE = 1
@@ -244,11 +245,17 @@ class Worker(object):
         socket.identity = self.identity
         socket.connect(self.backend)
 
-        if socket.poll(None, zmq.POLLOUT):
-            socket.send_multipart(Response.heartbeat())
+        socket.send_multipart(Response.heartbeat())
+        last_message = time.time()
 
         task = None
         while True:
+            if not self.replies.empty():
+                response = self.replies.get()
+                logger.info(f'-> {response}')
+                socket.send_multipart(response.parts())
+                last_message = time.time()
+
             if task is None:
                 if socket.poll(10, zmq.POLLIN):
                     req_data = socket.recv_multipart()
@@ -260,16 +267,15 @@ class Worker(object):
                     else:
                         task = Thread(target=self.service.call_remote, args=(request,), daemon=True)
                         task.start()
-            elif task.is_alive() or not self.replies.empty():
-                # block until task completes and reply queue is empty
-                if not self.replies.empty():
-                    response = self.replies.get()
-                    socket.send_multipart(response.parts())
-                    logger.debug(f'-> {response}')
             elif not task.is_alive():
                 task = None
 
-            time.sleep(0.001)
+            # Send a heartbeat every so often
+            if time.time() - last_message > MIN_HEARTBEAT_INTERVAL:
+                socket.send_multipart(Response.heartbeat())
+                last_message = time.time()
+
+            time.sleep(0.01)
 
 
 def start_worker(service, backend):
@@ -332,6 +338,8 @@ class Server(object):
         poller = zmq.Poller()
         poller.register(backend, zmq.POLLIN)
         workers = []
+        living = {}
+
         backend_ready = False
 
         while True:
@@ -343,6 +351,7 @@ class Server(object):
                 worker = reply[0]
 
                 response = Response.create(*reply[1:])
+                living[worker] = time.time()
 
                 if response.type in [ResponseType.DONE, ResponseType.ERROR, ResponseType.HEARTBEAT]:
                     workers.append(worker)
@@ -353,6 +362,12 @@ class Server(object):
                     backend_ready = True
                 if response.type != ResponseType.HEARTBEAT:
                     frontend.send_multipart(response.parts())
+
+            # check and expire workers
+            if workers:
+                expired = time.time() - MAX_HEARTBEAT_INTERVAL
+                living = {w: t for w, t in living.items() if t < expired}
+                workers = [w for w in workers if w in living]
 
             if frontend in sockets:
                 # Get next client request, route to last-used worker
