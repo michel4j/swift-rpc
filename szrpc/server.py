@@ -162,7 +162,7 @@ class Response(object):
             b'',
             b'heartbeat',
             ResponseType.HEARTBEAT,
-            {'time': datetime.now().isoformat()}
+            b''
         ).parts()
 
     def __str__(self):
@@ -234,7 +234,7 @@ class Worker(object):
         :param service:  A Service class which provides the API for the server
         :param backend: Backend address to connect to
         """
-        self.identity = short_uuid()
+
         self.service = service
         self.context = zmq.Context()
         self.backend = backend
@@ -242,7 +242,6 @@ class Worker(object):
 
     def run(self):
         socket = self.context.socket(zmq.DEALER)
-        socket.identity = self.identity
         socket.connect(self.backend)
 
         socket.send_multipart(Response.heartbeat())
@@ -252,7 +251,7 @@ class Worker(object):
         while True:
             if not self.replies.empty():
                 response = self.replies.get()
-                logger.info(f'-> {response}')
+                logger.debug(f'-> {response}')
                 socket.send_multipart(response.parts())
                 last_message = time.time()
 
@@ -366,7 +365,7 @@ class Server(object):
             # check and expire workers
             if workers:
                 expired = time.time() - MAX_HEARTBEAT_INTERVAL
-                living = {w: t for w, t in living.items() if t < expired}
+                living = {w: t for w, t in living.items() if t > expired}
                 workers = [w for w in workers if w in living]
 
             if frontend in sockets:
