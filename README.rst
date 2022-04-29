@@ -194,4 +194,4 @@ Presently, alternatives are available Gtk, Qt as well as a pure Python-based cla
 
     my_client = szrpc.client.Client('tcp://localhost:9990')
 
-All subsequent result objects will not be proper GObjects usable with the Gtk Main loop.
+All subsequent result objects will be proper GObjects usable with the Gtk Main loop.

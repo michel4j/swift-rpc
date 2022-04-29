@@ -294,15 +294,15 @@ class Server(object):
         self.backend_addr = f'tcp://*:{ports[1]}'
         self.instances = instances
         self.context = zmq.Context()
+        self.processes = []
 
     def start_workers(self):
         worker_addr = self.backend_addr.replace('*', 'localhost')
-        processes = []
         logger.info(f'Connecting {self.instances} worker(s) to {worker_addr}')
         for i in range(self.instances):
             p = Process(target=start_worker, args=(self.service, worker_addr))
             p.start()
-            processes.append(p)
+            self.processes.append(p)
 
     def run(self, load_balancing=False):
         """
@@ -312,6 +312,9 @@ class Server(object):
             self.load_balancing_proxy()
         else:
             self.simple_proxy()
+
+        for process in self.processes:
+            process.join()
 
     def simple_proxy(self):
         frontend = self.context.socket(zmq.ROUTER)
