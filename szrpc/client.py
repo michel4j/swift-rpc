@@ -102,7 +102,6 @@ class Client(object):
                     request = self.requests.get()
                     socket.send_multipart(request.parts())
 
-
     def emit_results(self):
         """
         Triggers pending result signals and cleans-up the results dictionary. Also monitors for connection issues

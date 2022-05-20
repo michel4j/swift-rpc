@@ -255,17 +255,16 @@ class Worker(object):
                 socket.send_multipart(response.parts())
                 last_message = time.time()
 
-            if os.getloadavg()[0] < cpu_count():
-                if socket.poll(10, zmq.POLLIN):
-                    req_data = socket.recv_multipart()
-                    try:
-                        request = Request.create(*req_data, reply_to=self.replies)
-                        logger.info(f'<- {request}')
-                    except Exception:
-                        logger.error('Invalid request!')
-                    else:
-                        task = Thread(target=self.service.call_remote, args=(request,), daemon=True)
-                        task.start()
+            if socket.poll(10, zmq.POLLIN):
+                req_data = socket.recv_multipart()
+                try:
+                    request = Request.create(*req_data, reply_to=self.replies)
+                    logger.info(f'<- {request}')
+                except Exception:
+                    logger.error('Invalid request!')
+                else:
+                    task = Thread(target=self.service.call_remote, args=(request,), daemon=True)
+                    task.start()
 
             # Send a heartbeat every so often
             if time.time() - last_message > MIN_HEARTBEAT_INTERVAL:
