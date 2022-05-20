@@ -2,10 +2,10 @@ import re
 import time
 import uuid
 import base64
-from datetime import datetime
+import os
 
 from threading import Thread
-from multiprocessing import Process, Queue
+from multiprocessing import Process, Queue, cpu_count
 
 import msgpack
 import zmq
@@ -255,7 +255,7 @@ class Worker(object):
                 socket.send_multipart(response.parts())
                 last_message = time.time()
 
-            if task is None:
+            if os.getloadavg()[0] < cpu_count():
                 if socket.poll(10, zmq.POLLIN):
                     req_data = socket.recv_multipart()
                     try:
@@ -266,8 +266,6 @@ class Worker(object):
                     else:
                         task = Thread(target=self.service.call_remote, args=(request,), daemon=True)
                         task.start()
-            elif not task.is_alive():
-                task = None
 
             # Send a heartbeat every so often
             if time.time() - last_message > MIN_HEARTBEAT_INTERVAL:

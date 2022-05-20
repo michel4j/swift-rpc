@@ -30,12 +30,12 @@ class Client(object):
     Base class for all clients.
     """
 
-    def __init__(self, address):
+    def __init__(self, address, methods=()):
         self.client_id = short_uuid()
         self.context = zmq.Context()
         self.url = address
         self.requests = Queue()
-        self.remote_methods = []
+        self.remote_methods = set(methods)
         self.results = {}
         self.ready = False
         self.last_available = time.time()
