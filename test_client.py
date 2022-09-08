@@ -24,7 +24,7 @@ if __name__ == '__main__':
 
     results = []
     names = ['Joe', 'Jim', 'Janay', 'John']
-    for i in range(10):
+    for i in range(2):
         c = random.choice([0, 1, 2])
         if c == 0:
             name = random.choice(names)

@@ -1,11 +1,12 @@
 import re
+import os
 import time
 import uuid
 import base64
-import os
 
+from typing import Type
 from threading import Thread
-from multiprocessing import Process, Queue, cpu_count
+from multiprocessing import Process, Queue
 
 import msgpack
 import zmq
@@ -16,6 +17,7 @@ logger = log.get_module_logger(__name__)
 SERVER_TIMEOUT = 4
 MIN_HEARTBEAT_INTERVAL = 1
 MAX_HEARTBEAT_INTERVAL = 2
+
 
 class ResponseType:
     DONE = 1
@@ -224,15 +226,39 @@ class Service(object):
         return self.allowed_methods
 
 
+class ServiceFactory(object):
+    """
+    A Factory which takes a service type class and arguments for instantiating it, and then creates
+    new instances as needed.
+    """
+
+    def __init__(self, service_type: Type[Service], *args, **kwargs):
+        """
+        :param service_type: Service class
+        :param args: positional arguments for Service
+        :param kwargs: Keyworded arguments for Service
+        """
+        self.service_type = service_type
+        self.args = args
+        self.kwargs = kwargs
+
+    def new(self):
+        """
+        Create a new Service instance
+        :return: Service object
+        """
+        return self.service_type(*self.args, **self.kwargs)
+
+
 class Worker(object):
     """
     A worker which manages an instance of the Service. Each work is able to perform the same tasks
     """
 
-    def __init__(self, service: Service, backend: str):
+    def __init__(self, backend: str, service: Service):
         """
-        :param service:  A Service class which provides the API for the server
         :param backend: Backend address to connect to
+        :param service: A Service class which provides the API for the server
         """
 
         self.service = service
@@ -241,6 +267,9 @@ class Worker(object):
         self.replies = Queue()
 
     def run(self):
+        """
+        Main loop of the worker
+        """
         socket = self.context.socket(zmq.DEALER)
         socket.connect(self.backend)
 
@@ -274,44 +303,45 @@ class Worker(object):
             time.sleep(0.01)
 
 
-def start_worker(service, backend):
-    worker = Worker(service, backend)
+def start_worker(address: str, factory: ServiceFactory):
+    """
+    Start a single worker in a subprocess
+    :param address: backend address
+    :param factory: Service Factory
+
+    """
+    service = factory.new()
+    worker = Worker(address, service)
+    logger.debug(f'Starting new worker process: {os.getpid()}')
     return worker.run()
 
 
 class Server(object):
-    def __init__(self, service: Service, ports: tuple = (9990, 9991), instances: int = 1):
+    def __init__(self, service_factory: ServiceFactory, ports: tuple = (9990, 9991), instances: int = 1):
         """
-        :param service: A Service class which provides the API for the server
-        :param ports: pair of ports for frontend and backend
+        :param service_factory: A Service factory which creates service instances
+        :param kwargs: Keyword arguments for the Service instance
+        :param ports: a pair of ports for frontend and backend
         :param instances: Number of workers to start on server. Additional workers can be started on other hosts
+
         """
-        self.service = service
+        self.service_factory = service_factory
         self.frontend_addr = f'tcp://*:{ports[0]}'
         self.backend_addr = f'tcp://*:{ports[1]}'
-        self.instances = instances
         self.context = zmq.Context()
-        self.processes = []
+        self.manager = WorkerManager(self.service_factory, self.backend_addr, instances=instances)
 
-    def start_workers(self):
-        worker_addr = self.backend_addr.replace('*', 'localhost')
-        logger.info(f'Connecting {self.instances} worker(s) to {worker_addr}')
-        for i in range(self.instances):
-            p = Process(target=start_worker, args=(self.service, worker_addr))
-            p.start()
-            self.processes.append(p)
-
-    def run(self, load_balancing=False):
+    def run(self, balancing=False):
         """
-        Listen for requests on the frontend and proxy them to the backend process them. Each request is handled in a separate thread.
+        Listen for requests on the frontend and proxy them to the backend process them.
+        Each request is handled in a separate thread.
         """
-        if load_balancing:
+        if balancing:
             self.load_balancing_proxy()
         else:
             self.simple_proxy()
 
-        for process in self.processes:
-            process.join()
+        self.manager.wait_for_workers()
 
     def simple_proxy(self):
         frontend = self.context.socket(zmq.ROUTER)
@@ -319,7 +349,7 @@ class Server(object):
         frontend.bind(self.frontend_addr)
         backend.bind(self.backend_addr)
 
-        self.start_workers()
+        self.manager.start_workers()
 
         zmq.proxy(frontend, backend)
 
@@ -332,12 +362,12 @@ class Server(object):
         frontend.bind(self.frontend_addr)
         backend.bind(self.backend_addr)
 
-        self.start_workers()
+        self.manager.start_workers()
 
         poller = zmq.Poller()
         poller.register(backend, zmq.POLLIN)
-        workers = []
-        living = {}
+        community = set()
+        workers = {}
 
         backend_ready = False
 
@@ -350,31 +380,48 @@ class Server(object):
                 worker = reply[0]
 
                 response = Response.create(*reply[1:])
-                living[worker] = time.time()
 
-                if response.type in [ResponseType.DONE, ResponseType.ERROR, ResponseType.HEARTBEAT]:
-                    workers.append(worker)
+                # Update heartbeat time every time we receive something from a worker that's on the list
+                # or if it is a new member of a community
+                if worker in workers or worker not in community:
+                    workers[worker] = time.time()
+
+                # Add worker to community if needed
+                if worker not in community:
+                    community.add(worker)
+                    logger.debug(f'Worker joined: {worker}')
+
+                # Add worker to list if a previous task completes or fails
+                if response.type in [ResponseType.DONE, ResponseType.ERROR] and worker not in workers:
+                    workers[worker] = time.time()
 
                 if workers and not backend_ready:
                     # Poll for clients now that a worker is available and backend was not ready
                     poller.register(frontend, zmq.POLLIN)
                     backend_ready = True
+
                 if response.type != ResponseType.HEARTBEAT:
                     frontend.send_multipart(response.parts())
 
-            # check and expire workers
+            # check and expire workers who haven't chatted in while
             if workers:
                 expired = time.time() - MAX_HEARTBEAT_INTERVAL
-                living = {w: t for w, t in living.items() if t > expired}
-                workers = [w for w in workers if w in living]
+                removed = [w for w, t in workers.items() if t <= expired]
+                workers = {w: t for w, t in workers.items() if t > expired}
+                if removed:
+                    logger.debug(f'Workers left: {removed}')
+                    community.difference_update(removed)
 
             if frontend in sockets:
-                # Get next client request, route to last-used worker
+                # Get next client request, route to last-used worker, the oldest item in workers dictionary
                 request = frontend.recv_multipart()
-                worker = workers.pop(0)
+
+                worker = next(iter(workers))
+                workers.pop(worker)     # remove worker from list as it is now busy
                 backend.send_multipart([worker] + request)
+
+                # Don't poll clients if no workers are available and set backend_ready flag to false
                 if not workers:
-                    # Don't poll clients if no workers are available and set backend_ready flag to false
                     poller.unregister(frontend)
                     backend_ready = False
 
@@ -383,23 +430,36 @@ class Server(object):
 
 
 class WorkerManager(object):
-    def __init__(self, service: Service, backend: str, instances: int = 1):
+    def __init__(self, factory: ServiceFactory, address: str, instances: int = 1):
         """
-        :param service:  A Service class which provides the API for the server
-        :param backend: Backend address to connect to
+        :param factory:  A Service class which provides the API for the server
+        :param address: Backend address to connect to
         :param instances: Number of worker instances to manage
         """
-        self.service = service
-        self.backend_addr = backend.replace('*', 'localhost')
+        self.factory = factory
+        self.backend_addr = address.replace('*', 'localhost')
         self.instances = instances
+        self.processes = []
+
+    def start_workers(self):
+        """
+        Start subprocesses for each worker
+        :return:
+        """
+        logger.info(f'Connecting {self.instances} worker(s) to {self.backend_addr}')
+        self.processes = []
+        for i in range(self.instances):
+            p = Process(target=start_worker, args=(self.backend_addr, self.factory))
+            p.start()
+            self.processes.append(p)
+
+    def wait_for_workers(self):
+        """
+        Wait for all worker processes to terminate
+        """
+        for proc in self.processes:
+            proc.join()
 
     def run(self):
-        logger.info(f'Connecting {self.instances} worker(s) to {self.backend_addr}')
-        workers = []
-        for i in range(self.instances):
-            p = Process(target=start_worker, args=(self.service, self.backend_addr))
-            p.start()
-            workers.append(p)
-
-        for p in workers:
-            p.join()
+        self.start_workers()
+        self.wait_for_workers()
