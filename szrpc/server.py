@@ -7,6 +7,7 @@ import base64
 from typing import Type
 from threading import Thread
 from multiprocessing import Process, Queue
+from enum import Enum
 
 import msgpack
 import zmq
@@ -19,19 +20,20 @@ MIN_HEARTBEAT_INTERVAL = 1
 MAX_HEARTBEAT_INTERVAL = 2
 
 
-class ResponseType:
+class ResponseType(Enum):
     DONE = 1
     UPDATE = 2
     ERROR = 3
     HEARTBEAT = 4
+    READY = 5
 
 
-ResponseMessage = {
-    1: 'DONE',
-    2: 'UPDATE',
-    3: 'ERROR',
-    4: 'HEARTBEAT'
-}
+def repr_worker_id(b):
+    """
+    Represent bytes in base64
+    :param b: bytes
+    """
+    return base64.b64encode(b).decode('ascii')
 
 
 def short_uuid():
@@ -93,7 +95,7 @@ class Request(object):
             reply_to=reply_to
         )
 
-    def reply(self, content, response_type: int = ResponseType.UPDATE):
+    def reply(self, content, response_type: ResponseType = ResponseType.UPDATE):
         """
         Generate a response object from the current request and send it
         to the reply queue.
@@ -133,7 +135,7 @@ class Response(object):
         """
         return [
             self.client_id, self.request_id,
-            msgpack.dumps(self.type), msgpack.dumps(self.content)
+            msgpack.dumps(self.type.value), msgpack.dumps(self.content)
         ]
 
     @staticmethod
@@ -150,7 +152,7 @@ class Response(object):
         return Response(
             client_id,
             request_id,
-            msgpack.loads(response_type),
+            ResponseType(msgpack.loads(response_type)),
             msgpack.loads(content)
         )
 
@@ -169,7 +171,7 @@ class Response(object):
 
     def __str__(self):
         return "rep[{}..:{}..] - {}".format(
-            self.client_id[:5].decode("utf-8"), self.request_id[:5].decode("utf-8"), ResponseMessage[self.type]
+            self.client_id[:5].decode("utf-8"), self.request_id[:5].decode("utf-8"), self.type.name
         )
 
 
@@ -196,8 +198,7 @@ class Service(object):
     def call_remote(self, request: Request):
         """
         Call the remote method in the request and place the response object in the reply queue when ready.
-        This is the main method which is invoked by the server once a request is received. This method will be called
-        in a separate thread for each request.
+        This is the main method which is invoked by the server once a request is received.
 
         :param request: Request object
         """
@@ -236,7 +237,7 @@ class ServiceFactory(object):
         """
         :param service_type: Service class
         :param args: positional arguments for Service
-        :param kwargs: Keyworded arguments for Service
+        :param kwargs: Keyword arguments for Service
         """
         self.service_type = service_type
         self.args = args
@@ -252,7 +253,7 @@ class ServiceFactory(object):
 
 class Worker(object):
     """
-    A worker which manages an instance of the Service. Each work is able to perform the same tasks
+    A worker which manages an instance of the Service. Each worker is able to perform the same tasks
     """
 
     def __init__(self, backend: str, service: Service):
@@ -276,7 +277,6 @@ class Worker(object):
         socket.send_multipart(Response.heartbeat())
         last_message = time.time()
 
-        task = None
         while True:
             if not self.replies.empty():
                 response = self.replies.get()
@@ -295,7 +295,7 @@ class Worker(object):
                     task = Thread(target=self.service.call_remote, args=(request,), daemon=True)
                     task.start()
 
-            # Send a heartbeat every so often
+            # Send a heartbeat every so often when idle
             if time.time() - last_message > MIN_HEARTBEAT_INTERVAL:
                 socket.send_multipart(Response.heartbeat())
                 last_message = time.time()
@@ -389,7 +389,7 @@ class Server(object):
                 # Add worker to community if needed
                 if worker not in community:
                     community.add(worker)
-                    logger.debug(f'Worker joined: {worker}')
+                    logger.debug(f'Workers [{len(workers):4d}], + : {repr_worker_id(worker)}')
 
                 # Add worker to list if a previous task completes or fails
                 if response.type in [ResponseType.DONE, ResponseType.ERROR] and worker not in workers:
@@ -409,7 +409,8 @@ class Server(object):
                 removed = [w for w, t in workers.items() if t <= expired]
                 workers = {w: t for w, t in workers.items() if t > expired}
                 if removed:
-                    logger.debug(f'Workers left: {removed}')
+                    removed_workers = ', '.join(map(repr_worker_id, removed))
+                    logger.debug(f'Workers [{len(workers):4d}], - : {removed_workers}')
                     community.difference_update(removed)
 
             if frontend in sockets:

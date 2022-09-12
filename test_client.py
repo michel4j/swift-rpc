@@ -19,25 +19,24 @@ if __name__ == '__main__':
     def on_update(res, data):
         logger.info(f"{data}")
 
+    def monitor(res, results):
+        res.connect('done', on_done)
+        res.connect('update', on_update)
+        res.connect('failed', on_err)
+        results.append(res)
+
     while not client.is_ready():
         time.sleep(.001)
 
     results = []
     names = ['Joe', 'Jim', 'Janay', 'John']
-    for i in range(2):
-        c = random.choice([0, 1, 2])
-        if c == 0:
-            name = random.choice(names)
-            res = client.hello_world(name=name)
-        elif c == 1:
-            res = client.date()
-        elif c == 2:
-            res = client.progress()
+    for i in range(15):
+        if i % 2 == 0:
+            monitor(client.hello_world(name=random.choice(names)), results)
+        if i % 3 == 0:
+            monitor(client.progress(label=f'proc{i}'), results)
 
-        res.connect('done', on_done)
-        res.connect('update', on_update)
-        res.connect('failed', on_err)
-        results.append(res)
+        monitor(client.date(), results)
         time.sleep(.05)
 
     while results:
