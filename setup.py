@@ -1,6 +1,5 @@
 
 from setuptools import setup, find_packages
-from szrpc import get_version
 
 with open('requirements.txt', 'r', encoding='utf-8') as f:
     requirements = f.read().splitlines()
@@ -8,10 +7,22 @@ with open('requirements.txt', 'r', encoding='utf-8') as f:
 with open("README.rst", "r", encoding='utf-8') as fh:
     long_description = fh.read()
 
+def my_version():
+    from setuptools_scm.version import get_local_dirty_tag
+
+    def clean_scheme(version):
+        return get_local_dirty_tag(version) if version.dirty else ''
+
+    def version_scheme(version):
+        print(str(version))
+        return str(version.format_with('{tag}.{distance}'))
+
+    return {'local_scheme': clean_scheme, 'version_scheme': version_scheme}
+
 
 setup(
     name='szrpc',
-    version=get_version(),
+    use_scm_version=my_version,
     url="https://github.com/michel4j/swift-rpc",
     license='MIT',
     author='Michel Fodje',
@@ -22,7 +33,7 @@ setup(
     keywords='rpc networking development',
     packages=find_packages(),
     install_requires=requirements + [
-        'importlib-metadata ~= 1.0 ; python_version < "3.8"',
+        'importlib-metadata ~= 1.0 ; python_version < "3.8"', "setuptools_scm"
     ],
     classifiers=[
         'Intended Audience :: Developers',

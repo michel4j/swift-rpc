@@ -1,2 +1,3 @@
 pyzmq
 msgpack
+setuptools_scm
