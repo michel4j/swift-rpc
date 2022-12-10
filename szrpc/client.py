@@ -39,13 +39,17 @@ class Client(object):
         self.results = {}
         self.ready = False
         self.last_available = time.time()
-        self.start()
+        self.start(introspect=(not methods))
 
-    def start(self):
+    def start(self, introspect=True):
         Thread(target=self.send_requests, daemon=True).start()
         Thread(target=self.emit_results, daemon=True).start()
-        res = self.call_remote('client_config')
-        res.connect('done', self.setup)
+        if introspect:
+            res = self.call_remote('client_config')
+            res.connect('done', self.setup)
+        else:
+            self.ready = True
+            logger.debug(f'~> {self.url}... Ready!')
 
     def setup(self, result, data):
         self.ready = True

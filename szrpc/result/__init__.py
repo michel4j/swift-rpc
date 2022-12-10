@@ -82,7 +82,7 @@ class ResultMixin(object):
 
     def failure(self, error: str):
         """
-        Update the results and notify that partial results are available.
+        Update the results and notify that results are available.
 
         :param error: error message
         """
