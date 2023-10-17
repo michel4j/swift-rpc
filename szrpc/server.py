@@ -217,6 +217,7 @@ class Service(object):
                 response_type = ResponseType.DONE
             except Exception as e:
                 reply = f'Error: {e}'
+                logger.exception(e)
                 response_type = ResponseType.ERROR
             request.reply(content=reply, response_type=response_type)
 
