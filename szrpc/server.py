@@ -189,7 +189,9 @@ class Service(object):
     overriding the call_remote method.
     """
 
-    def __init__(self):
+    PING_PACKET = b''
+
+    def __init__(self, *args, **kwargs):
         self.allowed_methods = tuple(
             re.sub('^remote__', '', attr)
             for attr in dir(self) if attr.startswith('remote__')
@@ -221,11 +223,17 @@ class Service(object):
                 response_type = ResponseType.ERROR
             request.reply(content=reply, response_type=response_type)
 
-    def remote__client_config(self, request):
+    def remote__client_config(self, request: Request):
         """
         Called by clients on connect. Return a list of allowed methods to call
         """
         return self.allowed_methods
+
+    def remote__ping(self, request: Request):
+        """
+        Respond to a ping request to indicate the server is alive
+        """
+        return self.PING_PACKET
 
 
 class ServiceFactory(object):
@@ -278,6 +286,9 @@ class Worker(object):
         socket.send_multipart(Response.heartbeat())
         last_message = time.time()
 
+        poller = zmq.Poller()
+        poller.register(socket, zmq.POLLIN)
+
         while True:
             if not self.replies.empty():
                 response = self.replies.get()
@@ -285,7 +296,8 @@ class Worker(object):
                 socket.send_multipart(response.parts())
                 last_message = time.time()
 
-            if socket.poll(10, zmq.POLLIN):
+            socks = dict(poller.poll(10))
+            if socket in socks and socks[socket] == zmq.POLLIN:
                 req_data = socket.recv_multipart()
                 try:
                     request = Request.create(*req_data, reply_to=self.replies)
@@ -372,63 +384,64 @@ class Server(object):
 
         backend_ready = False
 
-        while True:
-            sockets = dict(poller.poll())
+        try:
+            while True:
+                sockets = dict(poller.poll(10))
 
-            if backend in sockets:
-                # Handle worker activity on the backend
-                reply = backend.recv_multipart()
-                worker = reply[0]
+                if backend in sockets:
+                    # Handle worker activity on the backend
+                    reply = backend.recv_multipart()
+                    worker = reply[0]
 
-                response = Response.create(*reply[1:])
+                    response = Response.create(*reply[1:])
 
-                # Update heartbeat time every time we receive something from a worker that's on the list
-                # or if it is a new member of a community
-                if worker in workers or worker not in community:
-                    workers[worker] = time.time()
+                    # Update heartbeat time every time we receive something from a worker that's on the list
+                    # or if it is a new member of a community
+                    if worker in workers or worker not in community:
+                        workers[worker] = time.time()
 
-                # Add worker to community if needed
-                if worker not in community:
-                    community.add(worker)
-                    logger.debug(f'Workers [{len(workers):4d}], + : {repr_worker_id(worker)}')
+                    # Add worker to community if needed
+                    if worker not in community:
+                        community.add(worker)
+                        logger.debug(f'Workers [{len(workers):4d}], + : {repr_worker_id(worker)}')
 
-                # Add worker to list if a previous task completes or fails
-                if response.type in [ResponseType.DONE, ResponseType.ERROR] and worker not in workers:
-                    workers[worker] = time.time()
+                    # Add worker to list if a previous task completes or fails
+                    if response.type in [ResponseType.DONE, ResponseType.ERROR] and worker not in workers:
+                        workers[worker] = time.time()
 
-                if workers and not backend_ready:
-                    # Poll for clients now that a worker is available and backend was not ready
-                    poller.register(frontend, zmq.POLLIN)
-                    backend_ready = True
+                    if workers and not backend_ready:
+                        # Poll for clients now that a worker is available and backend was not ready
+                        poller.register(frontend, zmq.POLLIN)
+                        backend_ready = True
 
-                if response.type != ResponseType.HEARTBEAT:
-                    frontend.send_multipart(response.parts())
+                    if response.type != ResponseType.HEARTBEAT:
+                        frontend.send_multipart(response.parts())
 
-            # check and expire workers who haven't chatted in while
-            if workers:
-                expired = time.time() - MAX_HEARTBEAT_INTERVAL
-                removed = [w for w, t in workers.items() if t <= expired]
-                workers = {w: t for w, t in workers.items() if t > expired}
-                if removed:
-                    removed_workers = ', '.join(map(repr_worker_id, removed))
-                    logger.debug(f'Workers [{len(workers):4d}], - : {removed_workers}')
-                    community.difference_update(removed)
+                # check and expire workers who haven't chatted in while
+                if workers:
+                    expired = time.time() - MAX_HEARTBEAT_INTERVAL
+                    removed = [w for w, t in workers.items() if t <= expired]
+                    workers = {w: t for w, t in workers.items() if t > expired}
+                    if removed:
+                        removed_workers = ', '.join(map(repr_worker_id, removed))
+                        logger.debug(f'Workers [{len(workers):4d}], - : {removed_workers}')
+                        community.difference_update(removed)
 
-            if frontend in sockets:
-                # Get next client request, route to last-used worker, the oldest item in workers dictionary
-                request = frontend.recv_multipart()
+                if frontend in sockets:
+                    # Get next client request, route to last-used worker, the oldest item in workers dictionary
+                    request = frontend.recv_multipart()
 
-                worker = next(iter(workers))
-                workers.pop(worker)     # remove worker from list as it is now busy
-                backend.send_multipart([worker] + request)
+                    worker = next(iter(workers))
+                    workers.pop(worker)     # remove worker from list as it is now busy
+                    backend.send_multipart([worker] + request)
 
-                # Don't poll clients if no workers are available and set backend_ready flag to false
-                if not workers:
-                    poller.unregister(frontend)
-                    backend_ready = False
-
-        frontend.close()
-        backend.close()
+                    # Don't poll clients if no workers are available and set backend_ready flag to false
+                    if not workers:
+                        poller.unregister(frontend)
+                        backend_ready = False
+        finally:
+            frontend.close()
+            backend.close()
 
 
 class WorkerManager(object):

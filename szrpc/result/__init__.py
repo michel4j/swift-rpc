@@ -135,7 +135,7 @@ class ResultMixin(object):
 
 class Result(SignalObject, ResultMixin):
     """
-    Result object oviding methods for managing results
+    Result object providing methods for managing results
     """
     __slots__ = ('identity', 'parts', 'results', 'ready', 'failed', 'errors')
 
