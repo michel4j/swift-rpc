@@ -107,7 +107,6 @@ class Client(object):
         self.last_ping = time.time()
 
         while True:
-
             if socket.poll(10, zmq.POLLIN):
                 reply_data = socket.recv_multipart()
                 self.last_available = time.time()
@@ -126,18 +125,17 @@ class Client(object):
                             res.done(response.content)
                         elif response.type == ResponseType.ERROR:
                             res.failure(response.content)
-            elif self.heartbeat and self.last_ping + self.heartbeat < time.time():
-                if self.ready and time.time() > self.last_available + self.heartbeat:
-                    try:
-                        self.ping()
-                    except AttributeError:
-                        self.client_config()    # ping is not available, use client_config
-                    self.last_ping = time.time()
+            elif self.is_ready() and self.heartbeat and time.time() > self.last_ping + self.heartbeat:
+                # send ping if no activity within heartbeat interval
+                try:
+                    self.ping()
+                except AttributeError:
+                    self.client_config()    # ping is not available, use client_config
+                self.last_ping = time.time()
 
-            if socket.poll(10, zmq.POLLOUT):
-                if not self.requests.empty():
-                    request = self.requests.get()
-                    socket.send_multipart(request.parts())
+            if self.is_ready() and not self.requests.empty():
+                request = self.requests.get()
+                socket.send_multipart(request.parts())
 
     def emit_results(self):
         """
