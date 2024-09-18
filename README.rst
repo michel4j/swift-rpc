@@ -39,17 +39,21 @@ The following  example illustrates how simple it is to create one.
             """
             Single reply after a long duration
             """
-            request.reply(f'Please wait, {name}. This will take a while.')
+            request.reply(f'Please wait, {name} ...')
             time.sleep(10)
             return f'Hello, {name}. How is your world today?'
 
         def remote__date(self, request):
             """
             Single reply after a short duration
-            """           time.sleep(0.1)
+            """
+            time.sleep(0.1)
             return f"Today's date is {datetime.now()}"
 
         def remote__progress(self, request):
+            """
+            Multiple replies to show progress
+            """
             for i in range(10):
                 time.sleep(0.1)
                 request.reply(f'{i*10}% complete')
