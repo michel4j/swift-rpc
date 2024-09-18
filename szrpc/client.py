@@ -134,7 +134,7 @@ class Client(object):
                         self.client_config()    # ping is not available, use client_config
                     self.last_ping = time.time()
 
-            if socket .poll(10, zmq.POLLOUT):
+            if socket.poll(10, zmq.POLLOUT):
                 if not self.requests.empty():
                     request = self.requests.get()
                     socket.send_multipart(request.parts())
