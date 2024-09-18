@@ -115,7 +115,10 @@ Starting external workers is very similar to starting Servers.
 
         service = MyService()
         log.log_to_console()
-        server = WorkerManager(service=service, backend="tcp://localhost:9991", instances=2)
+        server = WorkerManager(
+            service=service, backend="tcp://localhost:9991",
+            instances=2
+        )
         server.run()
 
 
