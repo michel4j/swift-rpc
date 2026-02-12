@@ -44,6 +44,7 @@ class Client(object):
         self.remote_methods = set(methods)
         self.results = {}
         self.ready = False
+        self.starting = True
         self.last_available = time.time()
         self.last_ping = time.time()
         self.start(introspect=(not methods))
@@ -69,15 +70,15 @@ class Client(object):
         :param result: result object
         :param methods: sequence of method names returned from the server
         """
-        self.ready = True
         self.remote_methods = methods
+        self.ready = True
         logger.debug(f'~> {self.url}... Ready!')
 
     def is_ready(self) -> bool:
         """
         Check if the server is ready to receive commands
         """
-        return self.ready
+        return self.ready and self.remote_methods
 
     def call_remote(self, method: str, **kwargs) -> Result:
         """
@@ -107,6 +108,7 @@ class Client(object):
         self.last_ping = time.time()
 
         while True:
+            ping_pending = (time.time() - self.heartbeat > self.last_ping)
             if socket.poll(10, zmq.POLLIN):
                 reply_data = socket.recv_multipart()
                 self.last_available = time.time()
@@ -125,7 +127,7 @@ class Client(object):
                             res.done(response.content)
                         elif response.type == ResponseType.ERROR:
                             res.failure(response.content)
-            elif self.is_ready() and self.heartbeat and time.time() > self.last_ping + self.heartbeat:
+            elif self.is_ready() and ping_pending:
                 # send ping if no activity within heartbeat interval
                 try:
                     self.ping()
@@ -133,9 +135,10 @@ class Client(object):
                     self.client_config()    # ping is not available, use client_config
                 self.last_ping = time.time()
 
-            if self.is_ready() and not self.requests.empty():
+            if (self.is_ready() or self.starting) and not self.requests.empty():
                 request = self.requests.get()
                 socket.send_multipart(request.parts())
+                self.starting = False
 
     def emit_results(self):
         """
@@ -157,11 +160,11 @@ class Client(object):
                 time.sleep(0.01)
 
             # check connection
-            has_heartbeat = time.time() - self.last_available < 2 * self.heartbeat
-            if self.is_ready() and not has_heartbeat:
+            has_heartbeat = self.last_available + 2 * self.heartbeat > time.time()
+            if self.ready and not has_heartbeat:
                 self.ready = False
                 logger.error('Server connection lost!')
-            elif not self.is_ready() and has_heartbeat:
+            elif not self.ready and has_heartbeat and self.remote_methods:
                 self.ready = True
                 logger.info('Server connection restored!')
             time.sleep(0.01)
