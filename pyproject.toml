@@ -1,0 +1,48 @@
+[project]
+name = "swift-rpc"
+dynamic = ["version"]
+description = " Simple ZeroMQ RPC in Python"
+readme = "README.rst"
+readme-content-type = "text/x-rst"
+license = "MIT"
+authors = [
+    {name = "Michel Fodje",email = "michel.fodje@lightsource.ca"}
+]
+keywords = ["RPC", "ZeroMQ", "Networking", "Development"]
+classifiers = [
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
+requires-python = ">=3.9,<4.0"
+dependencies = [
+    "pyzmq",
+    "msgpack"
+]
+
+[project.urls]
+Homepage = "https://github.com/michel4j/swift-rpc"
+Issues = "https://github.com/michel4j/swift-rpc/issues"
+
+[tool.poetry]
+packages = [
+    { include = "szrpc", from = "." },
+]
+include = [
+    {path = "README.rst", format = ["sdist"]},
+]
+version = "0.0.0"
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0", "poetry-dynamic-versioning>=1.0.0,<2.0.0"]
+build-backend = "poetry_dynamic_versioning.backend"
+
+[tool.poetry.requires-plugins]
+poetry-dynamic-versioning = { version = ">=1.0.0,<2.0.0", extras = ["plugin"] }
+
+[tool.poetry-dynamic-versioning]
+enable = true
+vcs = "git"
+format = "{base}.{revision}{distance}"
