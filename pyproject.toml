@@ -1,5 +1,5 @@
 [project]
-name = "swift-rpc"
+name = "szrpc"
 dynamic = ["version"]
 description = " Simple ZeroMQ RPC in Python"
 readme = "README.rst"
