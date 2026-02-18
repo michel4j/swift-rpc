@@ -18,6 +18,7 @@ class CallRecord:
         self.client_id = client_id
         self.method = method
         self.kwargs = kwargs
+        self.signature = log.log_call(method, (), kwargs)
         self.worker_id = worker_id
         self.start_time = time.time()
         self.end_time: Optional[float] = None
@@ -29,8 +30,7 @@ class CallRecord:
         return {
             "request_id": self.request_id,
             "client_id": self.client_id,
-            "method": self.method,
-            "kwargs": self.kwargs,
+            "method": self.signature,
             "worker_id": self.worker_id,
             "start_time": self.start_time,
             "end_time": self.end_time,
@@ -53,6 +53,10 @@ class Monitor:
         self.workers: Dict[str, float] = {}
 
     def record_request(self, worker_id: str, client_id: str, request_id: str, method: str, kwargs: Dict[str, Any]):
+        # ignore pings
+        if method == 'ping':
+            return
+
         with self.lock:
             record = CallRecord(request_id, client_id, method, kwargs, worker_id)
             self.active_calls[request_id] = record

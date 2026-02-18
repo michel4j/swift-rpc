@@ -74,7 +74,9 @@ class ColoredConsoleHandler(logging.StreamHandler):
 
 
 def get_module_logger(name):
-    """A factory which creates loggers with the given name and returns it."""
+    """
+    A factory which creates loggers with the given name and returns it.
+    """
     name = name.split('.')[-1]
     logger = logging.getLogger(name)
     logger.setLevel(logging.DEBUG)
@@ -83,7 +85,9 @@ def get_module_logger(name):
 
 
 def log_to_console(level=logging.DEBUG):
-    """Add a log handler which logs to the console."""
+    """
+    Add a log handler which logs to the console.
+    """
 
     console = ColoredConsoleHandler()
     console.setLevel(level)
@@ -96,9 +100,27 @@ def log_to_console(level=logging.DEBUG):
 
 
 def log_to_file(filename, level=logging.DEBUG):
-    """Add a log handler which logs to the console."""
+    """
+    Add a log handler which logs to the console.
+    """
     logfile = RotatingFileHandler(filename, maxBytes=1000000, backupCount=10)
     logfile.setLevel(level)
     formatter = logging.Formatter('%(asctime)s [%(name)s] %(message)s', '%b/%d %H:%M:%S')
     logfile.setFormatter(formatter)
     logging.getLogger('').addHandler(logfile)
+
+
+def log_call(method, args, kwargs):
+    """
+    Generate a function call string for logging
+    :param method: method name
+    :param args: positional arguments
+    :param kwargs: keyword arguments
+    :return: string for example "log_call('check', 1, 2, 3, a=1, b=2, c=3)"
+    """
+
+    arg_strs = []
+    arg_strs.extend([repr(arg) for arg in args])
+    arg_strs.extend([f'{k}={repr(v)}' for k, v in kwargs.items()])
+
+    return f'{method}({", ".join(arg_strs)})'

@@ -27,6 +27,10 @@ class MyService(Service):
         time.sleep(2)
         return f"Today's date is {datetime.now()}"
 
+    def remote__error(self, request):
+        time.sleep(2)
+        raise ValueError('This method raises an error intentionally!')
+
     def remote__progress(self, request, label='test'):
         with self.lock:
             for i in range(10):

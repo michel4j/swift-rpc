@@ -36,7 +36,8 @@ if __name__ == '__main__':
             monitor(client.hello_world(name=random.choice(names)), results)
         if i % 3 == 0:
             monitor(client.progress(label=f'proc{i}'), results)
-
+        if i % 4 == 0:
+            monitor(client.error(), results)
         monitor(client.date(), results)
         time.sleep(0.5)
 

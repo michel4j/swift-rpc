@@ -1,11 +1,14 @@
 import re
 import os
+import sys
 import time
 import uuid
+import queue
+import socket
 
 from typing import Type
 from threading import Thread
-from multiprocessing import Process, Queue
+from multiprocessing import Process
 from enum import Enum
 
 import msgpack
@@ -28,11 +31,26 @@ class ResponseType(Enum):
     READY = 5
 
 
+def human_bytes(size: int) -> str:
+    """
+    Format byte size in human-readable form
+    :param size: integer number of bytes
+    :return: string representation of size
+    """
+    units = ('KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB')
+    if size < 1000:
+        return f"{size} B"
+    for i, unit in enumerate(units):
+        size /= 1024.0
+        if size < 1000:
+            return f"{size:.1f} {unit}"
+    return f"{size:.1f} {units[-1]}"
+
+
 def get_client_id():
     """
     Generate a unique client ID
     """
-    import socket
     host = socket.getfqdn().split('.')[0].lower()
     client = str(uuid.uuid1())[:8]
     return f'{host}/{client}'.encode('ascii')
@@ -41,7 +59,7 @@ def get_client_id():
 class Request(object):
     __slots__ = ('client_id', 'request_id', 'method', 'kwargs', 'reply_to', 'identity')
 
-    def __init__(self, client_id: bytes, request_id: bytes, method: str, kwargs: dict, reply_to: Queue = None):
+    def __init__(self, client_id: bytes, request_id: bytes, method: str, kwargs: dict, reply_to: queue.Queue = None):
         """
         Request object
 
@@ -70,7 +88,7 @@ class Request(object):
         ]
 
     @staticmethod
-    def create(client_id: bytes, request_id: bytes, method: bytes, arg_data: bytes, reply_to: Queue = None):
+    def create(client_id: bytes, request_id: bytes, method: bytes, arg_data: bytes, reply_to: queue.Queue = None):
         """
         Generate a request object from the raw information received through the network
 
@@ -78,7 +96,7 @@ class Request(object):
         :param request_id: request identifier
         :param method: method name
         :param arg_data: raw data for the arguments, msgpack encoded bytes
-        :reply_to:  reply queue for responses to be sent to
+        :param reply_to:  reply queue for responses to be sent to
         :return: new Request object
         """
         args = msgpack.loads(arg_data)
@@ -108,7 +126,8 @@ class Request(object):
 
     def __str__(self):
         req_id = '/'.join(self.request_id.decode('ascii').split('/')[-2:])
-        return f"req[{req_id}] - {self.method}()"
+        call_signature = log.log_call(self.method, (), self.kwargs)
+        return f"req[{req_id}] - {call_signature}"
 
 
 class Response(object):
@@ -140,7 +159,7 @@ class Response(object):
         :param client_id:
         :param request_id:
         :param response_type:
-        :param response_type:
+        :param content:
         :return: new Response object
         """
         return Response(
@@ -165,7 +184,8 @@ class Response(object):
 
     def __str__(self):
         req_id = '/'.join(self.request_id.decode('ascii').split('/')[-2:])
-        return f"req[{req_id}] - {self.type.name}()"
+        size = sys.getsizeof(self.content)
+        return f"req[{req_id}] - {self.type.name} {human_bytes(size)}"
 
 
 class Service(object):
@@ -196,7 +216,6 @@ class Service(object):
         Generate a unique worker id for the current host
         :return: worker id bytes
         """
-        import socket
         host = socket.getfqdn().split('.')[0].upper()
         unique = self.name_generator.generate_name()
         return f'{unique}@{host}'.encode('utf-8')
@@ -210,7 +229,7 @@ class Service(object):
         """
 
         try:
-            method = self.__getattribute__(f'remote__{request.method}')
+            method = getattr(self, f'remote__{request.method}')
         except AttributeError:
             logger.error(f'Service does not support remote method "{request.method}"')
             request.reply(
@@ -272,52 +291,51 @@ class Worker(object):
     def __init__(self, backend: str, service: Service):
         """
         :param backend: Backend address to connect to
-        :param service: A Service class which provides the API for the server
+        :param service: A Service instance which provides the API for the server
         """
 
         self.service = service
         self.context = zmq.Context()
         self.backend = backend
-        self.replies = Queue()
+        self.replies = queue.Queue()
 
     def run(self):
         """
         Main loop of the worker
         """
-        socket = self.context.socket(zmq.DEALER)
-        socket.identity = self.service.create_worker_id()
-        socket.connect(self.backend)
-        socket.send_multipart(Response.heartbeat())
+        sock = self.context.socket(zmq.DEALER)
+        sock.identity = self.service.create_worker_id()
+        sock.connect(self.backend)
+        sock.send_multipart(Response.heartbeat())
         last_message = time.time()
 
         poller = zmq.Poller()
-        poller.register(socket, zmq.POLLIN)
+        poller.register(sock, zmq.POLLIN)
 
         while True:
-            if not self.replies.empty():
+            while not self.replies.empty():
                 response = self.replies.get()
                 logger.debug(f'-> {response}')
-                socket.send_multipart(response.parts())
+                sock.send_multipart(response.parts())
                 last_message = time.time()
 
             socks = dict(poller.poll(10))
-            if socket in socks and socks[socket] == zmq.POLLIN:
-                req_data = socket.recv_multipart()
+            if sock in socks and socks[sock] == zmq.POLLIN:
+                req_data = sock.recv_multipart()
                 try:
                     request = Request.create(*req_data, reply_to=self.replies)
                     logger.info(f'<- {request}')
-                except Exception:
-                    logger.error('Invalid request!')
+                except Exception as e:
+                    logger.error(f'Invalid request: {e}')
+                    logger.exception(e)
                 else:
                     task = Thread(target=self.service.call_remote, args=(request,), daemon=True)
                     task.start()
 
             # Send a heartbeat every so often when idle
             if time.time() - last_message > MIN_HEARTBEAT_INTERVAL:
-                socket.send_multipart(Response.heartbeat())
+                sock.send_multipart(Response.heartbeat())
                 last_message = time.time()
-
-            time.sleep(0.01)
 
 
 def start_worker(address: str, factory: ServiceFactory):
@@ -337,7 +355,6 @@ class Server(object):
     def __init__(self, service_factory: ServiceFactory, ports: tuple = (9990, 9991), instances: int = 1, monitor_port: int = None):
         """
         :param service_factory: A Service factory which creates service instances
-        :param kwargs: Keyword arguments for the Service instance
         :param ports: a pair of ports for frontend and backend
         :param instances: Number of workers to start on server. Additional workers can be started on other hosts
         :param monitor_port: Port for the introspection web server. If None, introspection is disabled.
@@ -381,6 +398,98 @@ class Server(object):
         frontend.close()
         backend.close()
 
+    def round_robin_proxy(self):
+        """
+        A proxy which forwards all messages from the front-end to the back-end in round-robin fashion.
+        """
+        frontend = self.context.socket(zmq.ROUTER)
+        backend = self.context.socket(zmq.ROUTER)
+        frontend.bind(self.frontend_addr)
+        backend.bind(self.backend_addr)
+
+        self.manager.start_workers()
+
+        poller = zmq.Poller()
+        poller.register(backend, zmq.POLLIN)
+
+        workers = {}
+        worker_queue = []
+
+        try:
+            while True:
+                sockets = dict(poller.poll(10))
+
+                if backend in sockets:
+                    reply = backend.recv_multipart()
+                    worker = reply[0]
+
+                    if worker not in workers:
+                        workers[worker] = time.time()
+                        worker_queue.append(worker)
+                        logger.debug(f'Workers [{len(workers):4d}], + : {worker.decode("utf-8")}')
+                        if len(workers) == 1:
+                            poller.register(frontend, zmq.POLLIN)
+                    else:
+                        workers[worker] = time.time()
+
+                    try:
+                        response = Response.create(*reply[1:])
+                    except Exception as e:
+                        logger.error(f"Invalid response from worker {worker}: {e}")
+                        continue
+
+                    if response.type != ResponseType.HEARTBEAT:
+                        frontend.send_multipart(response.parts())
+                        if self.monitor:
+                            self.monitor.record_response(
+                                worker.decode('utf-8'),
+                                response.identity,
+                                response.type.name,
+                                response.content
+                            )
+                    elif self.monitor:
+                        self.monitor.update_worker(worker.decode('utf-8'))
+
+                if workers:
+                    expired = time.time() - MAX_HEARTBEAT_INTERVAL
+                    removed = [w for w, t in workers.items() if t <= expired]
+                    workers = {w: t for w, t in workers.items() if t > expired}
+
+                    if removed:
+                        for w in removed:
+                            if w in worker_queue:
+                                worker_queue.remove(w)
+
+                        removed_workers = ', '.join([w.decode('utf-8') for w in removed])
+                        logger.debug(f'Workers [{len(workers):4d}], - : {removed_workers}')
+
+                        if not workers:
+                            poller.unregister(frontend)
+
+                if frontend in sockets:
+                    request = frontend.recv_multipart()
+
+                    if worker_queue:
+                        worker = worker_queue.pop(0)
+                        worker_queue.append(worker)
+                        backend.send_multipart([worker] + request)
+
+                        if self.monitor:
+                            try:
+                                req_obj = Request.create(*request)
+                                self.monitor.record_request(
+                                    worker.decode('utf-8'),
+                                    req_obj.client_id.decode('utf-8'),
+                                    req_obj.identity,
+                                    req_obj.method,
+                                    req_obj.kwargs
+                                )
+                            except Exception as e:
+                                logger.error(f"Failed to record request in monitor: {e}")
+        finally:
+            frontend.close()
+            backend.close()
+
     def load_balancing_proxy(self):
         """
         A proxy which performs basic load balancing. That is a busy worker is removed from the worker pool until
@@ -410,8 +519,6 @@ class Server(object):
                     reply = backend.recv_multipart()
                     worker = reply[0]
 
-                    response = Response.create(*reply[1:])
-
                     # Update heartbeat time every time we receive something from a worker that's on the list
                     # or if it is a new member of a community
                     if worker in workers or worker not in community:
@@ -421,6 +528,12 @@ class Server(object):
                     if worker not in community:
                         community.add(worker)
                         logger.debug(f'Workers [{len(workers):4d}], + : {worker.decode("utf-8")}')
+
+                    try:
+                        response = Response.create(*reply[1:])
+                    except Exception as e:
+                        logger.error(f"Invalid response from worker {worker}: {e}")
+                        continue
 
                     # Add worker to list if a previous task completes or fails
                     if response.type in [ResponseType.DONE, ResponseType.ERROR] and worker not in workers:
@@ -486,7 +599,7 @@ class Server(object):
 class WorkerManager(object):
     def __init__(self, factory: ServiceFactory, address: str, instances: int = 1):
         """
-        :param factory:  A Service class which provides the API for the server
+        :param factory:  A ServiceFactory instance
         :param address: Backend address to connect to
         :param instances: Number of worker instances to manage
         """

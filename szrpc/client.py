@@ -123,8 +123,9 @@ class Client(object):
                 self.last_ping = time.time()
                 try:
                     response = Response.create(self.client_id, *reply_data)
-                except TypeError:
+                except Exception as e:
                     logger.error('Invalid response!')
+                    logger.exception(e)
                 else:
                     logger.debug(f'<- {response}')
                     res = self.results.get(response.request_id, None)
