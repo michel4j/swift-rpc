@@ -20,11 +20,11 @@ class MyService(Service):
 
     def remote__hello_world(self, request, name=None):
         request.reply(f'Please wait, {name}. This will take a while.')
-        time.sleep(1)
+        time.sleep(5)
         return f'Hello, {name}. How is your world today?'
 
     def remote__date(self, request):
-        time.sleep(1)
+        time.sleep(2)
         return f"Today's date is {datetime.now()}"
 
     def remote__progress(self, request, label='test'):
@@ -38,5 +38,5 @@ class MyService(Service):
 if __name__ == '__main__':
     log.log_to_console()
     factory = ServiceFactory(MyService, arg1=2, arg2=3, arg3=4.3, arg4='five')
-    server = Server(factory, ports=(9990, 9991), instances=1)
+    server = Server(factory, ports=(9990, 9991), instances=1, monitor_port=8080)
     server.run(balancing=False)

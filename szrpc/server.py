@@ -2,7 +2,6 @@ import re
 import os
 import time
 import uuid
-import base64
 
 from typing import Type
 from threading import Thread
@@ -11,7 +10,8 @@ from enum import Enum
 
 import msgpack
 import zmq
-from . import log
+from . import log, namer
+from . import monitor as mon
 
 logger = log.get_module_logger(__name__)
 
@@ -28,19 +28,14 @@ class ResponseType(Enum):
     READY = 5
 
 
-def repr_worker_id(b):
+def get_client_id():
     """
-    Represent bytes in base64
-    :param b: bytes
+    Generate a unique client ID
     """
-    return base64.b64encode(b).decode('ascii')
-
-
-def short_uuid():
-    """
-    Generate a 22 character UUID4 representation
-    """
-    return base64.b64encode(uuid.uuid4().bytes).strip(b'=')
+    import socket
+    host = socket.getfqdn().split('.')[0].lower()
+    client = str(uuid.uuid1())[:8]
+    return f'{host}/{client}'.encode('ascii')
 
 
 class Request(object):
@@ -112,9 +107,8 @@ class Request(object):
         return response
 
     def __str__(self):
-        return "req[{}..:{}..] - {}()".format(
-            self.client_id[:5].decode("utf-8"), self.request_id[:5].decode("utf-8"), self.method
-        )
+        req_id = '/'.join(self.request_id.decode('ascii').split('/')[-2:])
+        return f"req[{req_id}] - {self.method}()"
 
 
 class Response(object):
@@ -170,9 +164,8 @@ class Response(object):
         ).parts()
 
     def __str__(self):
-        return "rep[{}..:{}..] - {}".format(
-            self.client_id[:5].decode("utf-8"), self.request_id[:5].decode("utf-8"), self.type.name
-        )
+        req_id = '/'.join(self.request_id.decode('ascii').split('/')[-2:])
+        return f"req[{req_id}] - {self.type.name}()"
 
 
 class Service(object):
@@ -196,6 +189,17 @@ class Service(object):
             re.sub('^remote__', '', attr)
             for attr in dir(self) if attr.startswith('remote__')
         )
+        self.name_generator = namer.RandomGenerator()
+
+    def create_worker_id(self) -> bytes:
+        """
+        Generate a unique worker id for the current host
+        :return: worker id bytes
+        """
+        import socket
+        host = socket.getfqdn().split('.')[0].upper()
+        unique = self.name_generator.generate_name()
+        return f'{unique}@{host}'.encode('utf-8')
 
     def call_remote(self, request: Request):
         """
@@ -281,8 +285,8 @@ class Worker(object):
         Main loop of the worker
         """
         socket = self.context.socket(zmq.DEALER)
+        socket.identity = self.service.create_worker_id()
         socket.connect(self.backend)
-
         socket.send_multipart(Response.heartbeat())
         last_message = time.time()
 
@@ -330,12 +334,13 @@ def start_worker(address: str, factory: ServiceFactory):
 
 
 class Server(object):
-    def __init__(self, service_factory: ServiceFactory, ports: tuple = (9990, 9991), instances: int = 1):
+    def __init__(self, service_factory: ServiceFactory, ports: tuple = (9990, 9991), instances: int = 1, monitor_port: int = None):
         """
         :param service_factory: A Service factory which creates service instances
         :param kwargs: Keyword arguments for the Service instance
         :param ports: a pair of ports for frontend and backend
         :param instances: Number of workers to start on server. Additional workers can be started on other hosts
+        :param monitor_port: Port for the introspection web server. If None, introspection is disabled.
 
         """
         self.service_factory = service_factory
@@ -343,13 +348,17 @@ class Server(object):
         self.backend_addr = f'tcp://*:{ports[1]}'
         self.context = zmq.Context()
         self.manager = WorkerManager(self.service_factory, self.backend_addr, instances=instances)
+        self.monitor = None
+        if monitor_port:
+            self.monitor = mon.Monitor()
+            mon.start_monitor_thread(self.monitor, port=monitor_port)
 
     def run(self, balancing=False):
         """
         Listen for requests on the frontend and proxy them to the backend process them.
         Each request is handled in a separate thread.
         """
-        if balancing:
+        if balancing or self.monitor:
             self.load_balancing_proxy()
         else:
             self.simple_proxy()
@@ -357,6 +366,9 @@ class Server(object):
         self.manager.wait_for_workers()
 
     def simple_proxy(self):
+        """
+        A simple proxy which forwards all messages from the front-end to the back-end in round-robin fashion.
+        """
         frontend = self.context.socket(zmq.ROUTER)
         backend = self.context.socket(zmq.DEALER)
         frontend.bind(self.frontend_addr)
@@ -370,6 +382,11 @@ class Server(object):
         backend.close()
 
     def load_balancing_proxy(self):
+        """
+        A proxy which performs basic load balancing. That is a busy worker is removed from the worker pool until
+        it's current task is completed. At that point, it's added back to the pool for the next task
+        :return:
+        """
         frontend = self.context.socket(zmq.ROUTER)
         backend = self.context.socket(zmq.ROUTER)
         frontend.bind(self.frontend_addr)
@@ -403,7 +420,7 @@ class Server(object):
                     # Add worker to community if needed
                     if worker not in community:
                         community.add(worker)
-                        logger.debug(f'Workers [{len(workers):4d}], + : {repr_worker_id(worker)}')
+                        logger.debug(f'Workers [{len(workers):4d}], + : {worker.decode("utf-8")}')
 
                     # Add worker to list if a previous task completes or fails
                     if response.type in [ResponseType.DONE, ResponseType.ERROR] and worker not in workers:
@@ -416,6 +433,15 @@ class Server(object):
 
                     if response.type != ResponseType.HEARTBEAT:
                         frontend.send_multipart(response.parts())
+                        if self.monitor:
+                            self.monitor.record_response(
+                                worker.decode('utf-8'),
+                                response.identity,
+                                response.type.name,
+                                response.content
+                            )
+                    elif self.monitor:
+                        self.monitor.update_worker(worker.decode('utf-8'))
 
                 # check and expire workers who haven't chatted in while
                 if workers:
@@ -423,7 +449,7 @@ class Server(object):
                     removed = [w for w, t in workers.items() if t <= expired]
                     workers = {w: t for w, t in workers.items() if t > expired}
                     if removed:
-                        removed_workers = ', '.join(map(repr_worker_id, removed))
+                        removed_workers = ', '.join([w.decode('utf-8') for w in removed])
                         logger.debug(f'Workers [{len(workers):4d}], - : {removed_workers}')
                         community.difference_update(removed)
 
@@ -434,6 +460,19 @@ class Server(object):
                     worker = next(iter(workers))
                     workers.pop(worker)     # remove worker from list as it is now busy
                     backend.send_multipart([worker] + request)
+
+                    if self.monitor:
+                        try:
+                            req_obj = Request.create(*request)
+                            self.monitor.record_request(
+                                worker.decode('utf-8'),
+                                req_obj.client_id.decode('utf-8'),
+                                req_obj.identity,
+                                req_obj.method,
+                                req_obj.kwargs
+                            )
+                        except Exception as e:
+                            logger.error(f"Failed to record request in monitor: {e}")
 
                     # Don't poll clients if no workers are available and set backend_ready flag to false
                     if not workers:

@@ -1,5 +1,6 @@
 import functools
 import time
+import uuid
 from queue import Queue
 from threading import Thread
 
@@ -7,7 +8,7 @@ import zmq
 
 from . import log
 from .result import Result
-from .server import ResponseType, Request, Response, short_uuid
+from .server import ResponseType, Request, Response, get_client_id
 
 logger = log.get_module_logger('szrpc')
 
@@ -36,7 +37,7 @@ class Client(object):
         :param methods: sequence of method names to allow for this client
         :param heartbeat: heartbeat interval in seconds, if 0, no heartbeat is used (default)
         """
-        self.client_id = short_uuid()
+        self.client_id = get_client_id()
         self.context = zmq.Context()
         self.url = address
         self.heartbeat = heartbeat
@@ -48,6 +49,13 @@ class Client(object):
         self.last_available = time.time()
         self.last_ping = time.time()
         self.start(introspect=(not methods))
+
+    def create_request_id(self):
+        """
+        Generate a unique request ID
+        """
+        call_id = str(uuid.uuid1())[:8]
+        return f'{self.client_id.decode("ascii")}/{call_id}'.encode('ascii')
 
     def start(self, introspect=True):
         """
@@ -87,7 +95,7 @@ class Client(object):
         :param kwargs: parameters to pass to server
         :return: Returns a result object for deferred execution.
         """
-        request_id = short_uuid()
+        request_id = self.create_request_id()
         kwargs = {} if kwargs is None else kwargs
         request = Request(self.client_id, request_id, method, kwargs)
         self.requests.put(request)

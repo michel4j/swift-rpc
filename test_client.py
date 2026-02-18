@@ -31,7 +31,7 @@ if __name__ == '__main__':
 
     results = []
     names = ['Joe', 'Jim', 'Janay', 'John']
-    for i in range(5):
+    for i in range(15):
         if i % 2 == 0:
             monitor(client.hello_world(name=random.choice(names)), results)
         if i % 3 == 0:

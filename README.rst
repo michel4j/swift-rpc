@@ -95,10 +95,30 @@ To start the server with more than one worker on the local host, modify the `ins
 
 .. code-block:: python
 
-    server = Server(service=service, ports=(9990, 9991), instances=1)
+    server = Server(service_factory=factory, ports=(9990, 9991), instances=1)
 
 It is possible to start the server with `instances = 0` however, it will obviously not be able to handle any requests
 until at least one worker is started.
+
+Server Introspection
+====================
+Swift RPC provides a web-based introspection capability that allows administrators to see active and historical calls, error messages, and basic statistics about the server.
+
+To enable introspection, provide a `monitor_port` when creating the server:
+
+.. code-block:: python
+
+    server = Server(service_factory=factory, ports=(9990, 9991), monitor_port=8080)
+    server.run()
+
+Once the server is running, you can access the introspection dashboard by navigating to `http://localhost:8080` in your web browser. The dashboard provides:
+
+- **Uptime**: How long the server has been running.
+- **Total Requests**: Total number of requests processed.
+- **Errors**: Number of failed requests.
+- **Active Workers**: Number of currently connected workers.
+- **Active Calls**: List of requests currently being processed.
+- **Historical Calls**: List of recently completed requests with their results or error messages.
 
 Starting External Workers
 -------------------------
