@@ -6,7 +6,7 @@ import uuid
 import queue
 import socket
 
-from typing import Type
+from typing import Type, Literal
 from threading import Thread
 from multiprocessing import Process
 from enum import Enum
@@ -170,13 +170,13 @@ class Response(object):
         )
 
     @staticmethod
-    def heartbeat():
+    def heartbeat(system_id: bytes = b''):
         """
         Generate a heartbeat response packet
         :return: new Response object
         """
         return Response(
-            b'',
+            system_id,
             b'heartbeat',
             ResponseType.HEARTBEAT,
             b''
@@ -196,7 +196,7 @@ class Service(object):
     Remote methods have the following requirements:
     - Must start with "remote__" prefix.
     - Must accept the request object as the first argument
-    - The rest of the arguments must be keyworded arguments
+    - The rest of the arguments must be key-worded arguments
 
     A service object can return either a single response or multiple responses per request. This can be implemented by
     overriding the call_remote method.
@@ -370,29 +370,81 @@ class Server(object):
             self.monitor = mon.Monitor()
             mon.start_monitor_thread(self.monitor, port=monitor_port)
 
-    def run(self, balancing=False):
+    def run(self, balancing=False, proxy: Literal['simple', 'balancing', 'round-robin'] = 'round-robin'):
         """
         Listen for requests on the frontend and proxy them to the backend process them.
         Each request is handled in a separate thread.
+        :param balancing: if True, force the use the load balancing proxy
+        :param proxy: use this proxy type. One of 'simple', 'balancing', 'round-robin', default 'round-robin'.
+
         """
-        if balancing or self.monitor:
+        proxy = 'balancing' if balancing else proxy
+
+        if proxy == 'balancing':
             self.load_balancing_proxy()
-        else:
+        elif proxy == 'round-robin':
+            self.round_robin_proxy()
+        elif proxy == 'simple':
             self.simple_proxy()
+        else:
+            self.round_robin_proxy()    # default
 
         self.manager.wait_for_workers()
+
+    def _setup_sockets(self, front=zmq.ROUTER, back=zmq.ROUTER) -> tuple:
+        """
+        Setup zmq frontend and backend sockets and start worker processes
+        :param front:
+        :param back:
+        :return:
+        """
+        frontend = self.context.socket(front)
+        backend = self.context.socket(back)
+        frontend.bind(self.frontend_addr)
+        backend.bind(self.backend_addr)
+        self.manager.start_workers()
+        return frontend, backend
+
+    def _process_response(self, worker, reply, frontend):
+        try:
+            response = Response.create(*reply[1:])
+        except Exception as e:
+            logger.error(f"Invalid response from worker {worker}: {e}")
+            return None
+
+        if response.type != ResponseType.HEARTBEAT:
+            frontend.send_multipart(response.parts())
+            if self.monitor:
+                self.monitor.record_response(
+                    worker.decode('utf-8'),
+                    response.identity,
+                    response.type.name,
+                    response.content
+                )
+        elif self.monitor:
+            self.monitor.update_worker(worker.decode('utf-8'))
+
+        return response
+
+    def _monitor_request(self, worker, request):
+        if self.monitor:
+            try:
+                req_obj = Request.create(*request)
+                self.monitor.record_request(
+                    worker.decode('utf-8'),
+                    req_obj.client_id.decode('utf-8'),
+                    req_obj.identity,
+                    req_obj.method,
+                    req_obj.kwargs
+                )
+            except Exception as e:
+                logger.error(f"Failed to record request in monitor: {e}")
 
     def simple_proxy(self):
         """
         A simple proxy which forwards all messages from the front-end to the back-end in round-robin fashion.
         """
-        frontend = self.context.socket(zmq.ROUTER)
-        backend = self.context.socket(zmq.DEALER)
-        frontend.bind(self.frontend_addr)
-        backend.bind(self.backend_addr)
-
-        self.manager.start_workers()
-
+        frontend, backend = self._setup_sockets(zmq.ROUTER, zmq.DEALER)
         zmq.proxy(frontend, backend)
 
         frontend.close()
@@ -402,16 +454,10 @@ class Server(object):
         """
         A proxy which forwards all messages from the front-end to the back-end in round-robin fashion.
         """
-        frontend = self.context.socket(zmq.ROUTER)
-        backend = self.context.socket(zmq.ROUTER)
-        frontend.bind(self.frontend_addr)
-        backend.bind(self.backend_addr)
-
-        self.manager.start_workers()
-
+        frontend, backend = self._setup_sockets()
         poller = zmq.Poller()
         poller.register(backend, zmq.POLLIN)
-
+        backend_ready = False
         workers = {}
         worker_queue = []
 
@@ -422,49 +468,31 @@ class Server(object):
                 if backend in sockets:
                     reply = backend.recv_multipart()
                     worker = reply[0]
-
                     if worker not in workers:
                         workers[worker] = time.time()
                         worker_queue.append(worker)
                         logger.debug(f'Workers [{len(workers):4d}], + : {worker.decode("utf-8")}')
-                        if len(workers) == 1:
-                            poller.register(frontend, zmq.POLLIN)
                     else:
                         workers[worker] = time.time()
 
-                    try:
-                        response = Response.create(*reply[1:])
-                    except Exception as e:
-                        logger.error(f"Invalid response from worker {worker}: {e}")
-                        continue
+                    self._process_response(worker, reply, frontend)
 
-                    if response.type != ResponseType.HEARTBEAT:
-                        frontend.send_multipart(response.parts())
-                        if self.monitor:
-                            self.monitor.record_response(
-                                worker.decode('utf-8'),
-                                response.identity,
-                                response.type.name,
-                                response.content
-                            )
-                    elif self.monitor:
-                        self.monitor.update_worker(worker.decode('utf-8'))
+                # check and expire workers who haven't chatted in while
+                expired = time.time() - MAX_HEARTBEAT_INTERVAL
+                removed = [w for w, t in workers.items() if t <= expired]
+                workers = {w: t for w, t in workers.items() if t > expired}
+                worker_queue = list(workers.keys())
+                if removed:
+                    removed_workers = ', '.join([w.decode('utf-8') for w in removed])
+                    logger.debug(f'Workers [{len(workers):4d}], - : {removed_workers}')
 
-                if workers:
-                    expired = time.time() - MAX_HEARTBEAT_INTERVAL
-                    removed = [w for w, t in workers.items() if t <= expired]
-                    workers = {w: t for w, t in workers.items() if t > expired}
-
-                    if removed:
-                        for w in removed:
-                            if w in worker_queue:
-                                worker_queue.remove(w)
-
-                        removed_workers = ', '.join([w.decode('utf-8') for w in removed])
-                        logger.debug(f'Workers [{len(workers):4d}], - : {removed_workers}')
-
-                        if not workers:
-                            poller.unregister(frontend)
+                if workers and not backend_ready:
+                    # Poll for clients now that a worker is available and backend was not ready
+                    poller.register(frontend, zmq.POLLIN)
+                    backend_ready = True
+                elif backend_ready and not workers:
+                    poller.unregister(frontend)
+                    backend_ready = False
 
                 if frontend in sockets:
                     request = frontend.recv_multipart()
@@ -473,19 +501,7 @@ class Server(object):
                         worker = worker_queue.pop(0)
                         worker_queue.append(worker)
                         backend.send_multipart([worker] + request)
-
-                        if self.monitor:
-                            try:
-                                req_obj = Request.create(*request)
-                                self.monitor.record_request(
-                                    worker.decode('utf-8'),
-                                    req_obj.client_id.decode('utf-8'),
-                                    req_obj.identity,
-                                    req_obj.method,
-                                    req_obj.kwargs
-                                )
-                            except Exception as e:
-                                logger.error(f"Failed to record request in monitor: {e}")
+                        self._monitor_request(worker, request)
         finally:
             frontend.close()
             backend.close()
@@ -496,18 +512,11 @@ class Server(object):
         it's current task is completed. At that point, it's added back to the pool for the next task
         :return:
         """
-        frontend = self.context.socket(zmq.ROUTER)
-        backend = self.context.socket(zmq.ROUTER)
-        frontend.bind(self.frontend_addr)
-        backend.bind(self.backend_addr)
-
-        self.manager.start_workers()
-
+        frontend, backend = self._setup_sockets()
         poller = zmq.Poller()
         poller.register(backend, zmq.POLLIN)
         community = set()
         workers = {}
-
         backend_ready = False
 
         try:
@@ -529,10 +538,8 @@ class Server(object):
                         community.add(worker)
                         logger.debug(f'Workers [{len(workers):4d}], + : {worker.decode("utf-8")}')
 
-                    try:
-                        response = Response.create(*reply[1:])
-                    except Exception as e:
-                        logger.error(f"Invalid response from worker {worker}: {e}")
+                    response = self._process_response(worker, reply, frontend)
+                    if not response:
                         continue
 
                     # Add worker to list if a previous task completes or fails
@@ -543,18 +550,6 @@ class Server(object):
                         # Poll for clients now that a worker is available and backend was not ready
                         poller.register(frontend, zmq.POLLIN)
                         backend_ready = True
-
-                    if response.type != ResponseType.HEARTBEAT:
-                        frontend.send_multipart(response.parts())
-                        if self.monitor:
-                            self.monitor.record_response(
-                                worker.decode('utf-8'),
-                                response.identity,
-                                response.type.name,
-                                response.content
-                            )
-                    elif self.monitor:
-                        self.monitor.update_worker(worker.decode('utf-8'))
 
                 # check and expire workers who haven't chatted in while
                 if workers:
@@ -573,19 +568,7 @@ class Server(object):
                     worker = next(iter(workers))
                     workers.pop(worker)     # remove worker from list as it is now busy
                     backend.send_multipart([worker] + request)
-
-                    if self.monitor:
-                        try:
-                            req_obj = Request.create(*request)
-                            self.monitor.record_request(
-                                worker.decode('utf-8'),
-                                req_obj.client_id.decode('utf-8'),
-                                req_obj.identity,
-                                req_obj.method,
-                                req_obj.kwargs
-                            )
-                        except Exception as e:
-                            logger.error(f"Failed to record request in monitor: {e}")
+                    self._monitor_request(worker, request)
 
                     # Don't poll clients if no workers are available and set backend_ready flag to false
                     if not workers:
