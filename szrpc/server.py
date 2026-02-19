@@ -468,20 +468,18 @@ class Server(object):
                 if backend in sockets:
                     reply = backend.recv_multipart()
                     worker = reply[0]
-                    if worker not in workers:
-                        workers[worker] = time.time()
+                    worker_is_new = worker not in workers
+                    workers[worker] = time.time()
+                    if worker_is_new:
                         worker_queue.append(worker)
                         logger.debug(f'Workers [{len(workers):4d}], + : {worker.decode("utf-8")}')
-                    else:
-                        workers[worker] = time.time()
-
                     self._process_response(worker, reply, frontend)
 
                 # check and expire workers who haven't chatted in while
                 expired = time.time() - MAX_HEARTBEAT_INTERVAL
                 removed = [w for w, t in workers.items() if t <= expired]
                 workers = {w: t for w, t in workers.items() if t > expired}
-                worker_queue = list(workers.keys())
+                worker_queue = [key for key in worker_queue if key in workers]
                 if removed:
                     removed_workers = ', '.join([w.decode('utf-8') for w in removed])
                     logger.debug(f'Workers [{len(workers):4d}], - : {removed_workers}')
@@ -494,14 +492,17 @@ class Server(object):
                     poller.unregister(frontend)
                     backend_ready = False
 
-                if frontend in sockets:
+                if frontend in sockets and worker_queue:
                     request = frontend.recv_multipart()
 
-                    if worker_queue:
-                        worker = worker_queue.pop(0)
-                        worker_queue.append(worker)
-                        backend.send_multipart([worker] + request)
-                        self._monitor_request(worker, request)
+                    # cycle worker from front to back of queue
+                    worker = worker_queue.pop(0)
+                    worker_queue.append(worker)
+
+                    # send task to worker
+                    backend.send_multipart([worker] + request)
+                    self._monitor_request(worker, request)
+
         finally:
             frontend.close()
             backend.close()
