@@ -31,22 +31,6 @@ class ResponseType(Enum):
     READY = 5
 
 
-def human_bytes(size: int) -> str:
-    """
-    Format byte size in human-readable form
-    :param size: integer number of bytes
-    :return: string representation of size
-    """
-    units = ('KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB')
-    if size < 1000:
-        return f"{size} B"
-    for i, unit in enumerate(units):
-        size /= 1024.0
-        if size < 1000:
-            return f"{size:.1f} {unit}"
-    return f"{size:.1f} {units[-1]}"
-
-
 def get_client_id():
     """
     Generate a unique client ID
@@ -185,7 +169,7 @@ class Response(object):
     def __str__(self):
         req_id = '/'.join(self.request_id.decode('ascii').split('/')[-2:])
         size = sys.getsizeof(self.content)
-        return f"req[{req_id}] - {self.type.name} {human_bytes(size)}"
+        return f"req[{req_id}] - {self.type.name} {mon.human_bytes(size)}"
 
 
 class Service(object):
@@ -481,7 +465,7 @@ class Server(object):
                 expired = time.time() - MAX_HEARTBEAT_INTERVAL
                 removed = [w for w, t in workers.items() if t <= expired]
                 workers = {w: t for w, t in workers.items() if t > expired}
-                worker_queue = list(workers.keys())
+                worker_queue = [w for w in worker_queue if w in workers]
                 if removed:
                     removed_workers = ', '.join([w.decode('utf-8') for w in removed])
                     logger.debug(f'Workers [{len(workers):4d}], - : {removed_workers}')
@@ -498,8 +482,8 @@ class Server(object):
                     request = frontend.recv_multipart()
 
                     if worker_queue:
-                        worker = worker_queue.pop(0)
-                        worker_queue.append(worker)
+                        worker = worker_queue.pop(0)    # get next available worker
+                        worker_queue.append(worker)     # add worker back to end of queue for round-robin
                         backend.send_multipart([worker] + request)
                         self._monitor_request(worker, request)
         finally:

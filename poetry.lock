@@ -214,18 +214,6 @@ standard = ["email-validator (>=2.0.0)", "fastapi-cli[standard] (>=0.0.8)", "htt
 standard-no-fastapi-cloud-cli = ["email-validator (>=2.0.0)", "fastapi-cli[standard-no-fastapi-cloud-cli] (>=0.0.8)", "httpx (>=0.23.0,<1.0.0)", "jinja2 (>=3.1.5)", "pydantic-extra-types (>=2.0.0)", "pydantic-settings (>=2.0.0)", "python-multipart (>=0.0.18)", "uvicorn[standard] (>=0.12.0)"]
 
 [[package]]
-name = "funkybob"
-version = "2023.12.0"
-description = ""
-optional = false
-python-versions = "*"
-groups = ["main"]
-files = [
-    {file = "funkybob-2023.12.0-py3-none-any.whl", hash = "sha256:f8e0afbb309cfa3681b1bb3fe327f9b19383a2930837ef4997b59c0e772d9483"},
-    {file = "funkybob-2023.12.0.tar.gz", hash = "sha256:98f313597e81458440788c747f4066e6563750ba3cf710229bae0c4fc21cd3cb"},
-]
-
-[[package]]
 name = "h11"
 version = "0.16.0"
 description = "A pure-Python, bring-your-own-I/O implementation of HTTP/1.1"
@@ -667,4 +655,4 @@ standard = ["colorama (>=0.4) ; sys_platform == \"win32\"", "httptools (>=0.6.3)
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10,<4.0"
-content-hash = "f076f5a64f3dab81a7c151a7073db6900b7b739da021c24aff16dd00f8d23ba1"
+content-hash = "18d85c99afdacd10c0ce39971bbab0d4ee990e7950a70f29b662bc378ac63620"

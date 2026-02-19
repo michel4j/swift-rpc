@@ -1,3 +1,4 @@
+import sys
 import threading
 import time
 from collections import deque
@@ -12,6 +13,22 @@ from . import log
 logger = log.get_module_logger("server")
 
 
+def human_bytes(size: int) -> str:
+    """
+    Format byte size in human-readable form
+    :param size: integer number of bytes
+    :return: string representation of size
+    """
+    units = ('K', 'M', 'G', 'T', 'P', 'E', 'Z', 'Y')
+    if size < 1000:
+        return f"{size}"
+    for i, unit in enumerate(units):
+        size /= 1024.0
+        if size < 1000:
+            return f"{size:.1f}{unit}"
+    return f"{size:.1f} {units[-1]}"
+
+
 class CallRecord:
     def __init__(self, request_id: str, client_id: str, method: str, kwargs: Dict[str, Any], worker_id: str):
         self.request_id = request_id
@@ -24,6 +41,8 @@ class CallRecord:
         self.end_time: Optional[float] = None
         self.duration: Optional[float] = None
         self.status = "ACTIVE"
+        self.sent_bytes = 0
+        self.num_updates = 0
         self.result: Any = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -36,6 +55,8 @@ class CallRecord:
             "end_time": self.end_time,
             "duration": self.duration,
             "status": self.status,
+            "sent_bytes": self.sent_bytes,
+            "updates": self.num_updates,
             "result": str(self.result) if self.result is not None else None
         }
 
@@ -66,14 +87,26 @@ class Monitor:
     def record_response(self, worker_id: str, request_id: str, status: str, result: Any):
         with self.lock:
             if request_id in self.active_calls:
-                record = self.active_calls.pop(request_id)
+                record = self.active_calls[request_id]
                 record.end_time = time.time()
                 record.duration = record.end_time - record.start_time
-                record.status = status
                 record.result = result
+
+                if status == "UPDATE":
+                    record.num_updates += 1
+
                 if status == "ERROR":
                     self.stats["total_errors"] += 1
-                self.historical_calls.append(record)
+                elif status in ["DONE", "UPDATE"]:
+                    record.sent_bytes += sys.getsizeof(result)
+                    result_size = human_bytes(record.sent_bytes)
+                    record.result = f'Updates: {record.num_updates}, Bytes: {result_size}'
+
+                if status in ['DONE', 'ERROR']:
+                    record.status = status
+                    rec = self.active_calls.pop(request_id)
+                    self.historical_calls.append(rec)
+
             self.workers[worker_id] = time.time()
 
     def update_worker(self, worker_id: str):
@@ -100,7 +133,7 @@ class Monitor:
             }
 
 
-app = FastAPI(title="szrpc Introspection")
+app = FastAPI(title="Swift RPC Introspection")
 monitor_instance: Optional[Monitor] = None
 
 
@@ -129,17 +162,16 @@ async def index():
         .stat-card { background: white; padding: 15px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); flex: 1; text-align: center; }
         .stat-card h3 { margin: 0; font-size: 0.9em; color: #666;}
         .stat-card p { margin: 10px 0 0; font-size: 1.5em; font-weight: bold; }
-        table { width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #eee; }
-        th { background-color: #6200ee; color: white; }
-        tr:hover { background-color: #f1f1f1; }
         .status-ACTIVE { color: #2196F3; font-weight: bold; }
         .status-DONE { color: #4CAF50; font-weight: bold; }
         .status-ERROR { color: #F44336; font-weight: bold; }
+        .table { --bs-table-bg: transparent !important; background-color: transparent !important;}
+        td { font-family: monospace; font-size: 0.8em; }
         pre { white-space: pre-wrap; word-wrap: break-word; font-size: 0.8em; margin: 0; max-height: 100px; overflow-y: auto; }
     </style>
 </head>
-<body class="p-5">
+<body class="p-5 bg-tertiary">
+    <div class="container-fluid">
     <h1>Swift RPC Server Introspection</h1>
     
     <div class="stats" id="stats">
@@ -150,7 +182,7 @@ async def index():
     </div>
 
     <h2>Active Calls</h2>
-    <table>
+    <table class="table">
         <thead>
             <tr>
                 <th>Request ID</th>
@@ -164,7 +196,7 @@ async def index():
     </table>
 
     <h2>Historical Calls</h2>
-    <table>
+    <table class="table">
         <thead>
             <tr>
                 <th>Request ID</th>
@@ -177,6 +209,7 @@ async def index():
         </thead>
         <tbody id="historical-calls-body"></tbody>
     </table>
+    </div>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js" 
         integrity="sha384-FKyoEForCGlyvwx9Hj09JcYn3nv7wiPVlz7YYwJrWVcXK/BmnVDxM+D2scQbITxI" 
         crossorigin="anonymous"></script>
@@ -227,9 +260,9 @@ async def index():
                         <td>${c.request_id}</td>
                         <td>${c.method}</td>
                         <td>${c.worker_id}</td>
-                        <td class="status-${c.status}">${c.status}</td>
+                        <td><span class="badge bg-light border status-${c.status}">${c.status}</span></td>
                         <td>${formatDuration(c.duration)}</td>
-                        <td><pre>${c.result}</pre></td>
+                        <td>${c.result}</td>
                     </tr>
                 `).join('');
             } catch (e) {
