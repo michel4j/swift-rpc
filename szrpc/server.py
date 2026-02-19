@@ -31,22 +31,6 @@ class ResponseType(Enum):
     READY = 5
 
 
-def human_bytes(size: int) -> str:
-    """
-    Format byte size in human-readable form
-    :param size: integer number of bytes
-    :return: string representation of size
-    """
-    units = ('KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB')
-    if size < 1000:
-        return f"{size} B"
-    for i, unit in enumerate(units):
-        size /= 1024.0
-        if size < 1000:
-            return f"{size:.1f} {unit}"
-    return f"{size:.1f} {units[-1]}"
-
-
 def get_client_id():
     """
     Generate a unique client ID
@@ -185,7 +169,7 @@ class Response(object):
     def __str__(self):
         req_id = '/'.join(self.request_id.decode('ascii').split('/')[-2:])
         size = sys.getsizeof(self.content)
-        return f"req[{req_id}] - {self.type.name} {human_bytes(size)}"
+        return f"req[{req_id}] - {self.type.name} {mon.human_bytes(size)}"
 
 
 class Service(object):
@@ -479,7 +463,7 @@ class Server(object):
                 expired = time.time() - MAX_HEARTBEAT_INTERVAL
                 removed = [w for w, t in workers.items() if t <= expired]
                 workers = {w: t for w, t in workers.items() if t > expired}
-                worker_queue = [key for key in worker_queue if key in workers]
+                worker_queue = [w for w in worker_queue if w in workers]
                 if removed:
                     removed_workers = ', '.join([w.decode('utf-8') for w in removed])
                     logger.debug(f'Workers [{len(workers):4d}], - : {removed_workers}')
@@ -492,7 +476,7 @@ class Server(object):
                     poller.unregister(frontend)
                     backend_ready = False
 
-                if frontend in sockets and worker_queue:
+                if frontend in sockets:
                     request = frontend.recv_multipart()
 
                     # cycle worker from front to back of queue
