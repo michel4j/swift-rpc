@@ -1,6 +1,9 @@
+from __future__ import annotations
+
 import functools
 import time
 import uuid
+import importlib
 from queue import Queue
 from threading import Thread
 
@@ -12,24 +15,33 @@ from .server import ResponseType, Request, Response, get_client_id
 
 logger = log.get_module_logger('szrpc')
 
-RESULT_CLASS = Result
 
-
-def use(result_class):
+def load_class(dotted_path: str) -> type:
     """
-    Swap out the Result Class
-
-    :param result_class: Class object
+    Dynamically loads a class from a dotted path string.
+    e.g., "my_package.my_module.MyClass"
+    
     """
-
-    global RESULT_CLASS
-    RESULT_CLASS = result_class
+    parts = dotted_path.rsplit('.', 1)
+    try:
+        module_name, class_name = parts
+        module = importlib.import_module(module_name)
+        class_object = getattr(module, class_name)
+        return class_object
+    except IndexError as e:
+        raise IndexError(f"Invalid dotted path: {dotted_path}: {e}")
+    except ImportError as e:
+        raise ImportError(f"Could not import module {parts[0]}: {e}")
+    except AttributeError as e:
+        raise AttributeError(f"Could not find class {parts[1]} in module {parts[0]}: {e}")
 
 
 class Client(object):
     """
     Base class for all clients.
     """
+
+    RESULT_CLASS = Result
 
     def __init__(self, address, methods=(), heartbeat: int = 0):
         """
@@ -49,6 +61,17 @@ class Client(object):
         self.last_available = time.time()
         self.last_ping = time.time()
         self.start(introspect=(not methods))
+
+    @classmethod
+    def use(cls, result_class: type | str):
+        """
+        Swap out the Result Class
+
+        :param result_class: Class object or dotted path string
+        """
+        if isinstance(result_class, str):
+            result_class = load_class(result_class)
+        cls.RESULT_CLASS = result_class
 
     def create_request_id(self):
         """
@@ -99,7 +122,7 @@ class Client(object):
         kwargs = {} if kwargs is None else kwargs
         request = Request(self.client_id, request_id, method, kwargs)
         self.requests.put(request)
-        self.results[request_id] = RESULT_CLASS(request_id)
+        self.results[request_id] = self.RESULT_CLASS(request_id)
         logger.debug(f'-> {request}')
         return self.results[request_id]
 
@@ -183,3 +206,14 @@ class Client(object):
             return functools.partial(self.call_remote, name)
         else:
             raise AttributeError(f'{self.__class__.__name__!r} has no attribute {name!r}')
+
+
+def use(result_class: type | str):
+    """
+    Swap out the Result Class
+
+    :param result_class: Class object or dotted string
+    """
+
+    Client.use(result_class)
+

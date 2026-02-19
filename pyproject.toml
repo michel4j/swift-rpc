@@ -37,6 +37,9 @@ include = [
 version = "0.0.0"
 
 
+[tool.poetry.group.dev.dependencies]
+pygobject = "^3.54.5"
+
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0", "poetry-dynamic-versioning>=1.0.0,<2.0.0"]
 build-backend = "poetry_dynamic_versioning.backend"
