@@ -1,3 +1,4 @@
+import socket
 import sys
 import threading
 import time
@@ -66,6 +67,7 @@ class Monitor:
         self.lock = threading.Lock()
         self.active_calls: Dict[str, CallRecord] = {}
         self.historical_calls: deque[CallRecord] = deque(maxlen=history_size)
+        self.host = socket.getfqdn().split('.')[0].upper()
         self.stats = {
             "total_requests": 0,
             "total_errors": 0,
@@ -121,6 +123,7 @@ class Monitor:
             self.workers = active_workers
 
             return {
+                "host": self.host,
                 "active_calls": [c.to_dict() for c in self.active_calls.values()],
                 "historical_calls": [c.to_dict() for c in reversed(self.historical_calls)],
                 "stats": {
@@ -172,26 +175,26 @@ async def index():
         <div class="d-flex flex-column flex-md-row align-items-center pb-3 mb-4 border-bottom">
         <a href="/" class="d-flex align-items-center text-dark text-decoration-none">
             <svg xmlns="http://www.w3.org/2000/svg" width="40" height="32" class="me-2" viewBox="0 0 118 94" role="img">
-  <title>Swift RPC</title>
-  <defs>
-    <mask id="equilibrium-mask">
-      <rect x="0" y="0" width="118" height="94" fill="white"></rect>
-      <text x="69" y="47" dx="-3" font-size="64" font-weight="bold" font-family="system-ui, -apple-system, sans-serif" text-anchor="middle" dominant-baseline="central" fill="black">⇌</text>
-    </mask>
-  </defs>
-  
-  <rect 
-    x="16.5" 
-    y="9.5" 
-    width="95" 
-    height="85" 
-    rx="14" 
-    transform="translate(59 47) skewX(-15) translate(-59 -47)"
-    mask="url(#equilibrium-mask)" 
-    fill="currentColor">
-  </rect>
-</svg>
-<span class="fs-4">Swift RPC Server</span>
+              <title>Swift RPC</title>
+              <defs>
+                <mask id="equilibrium-mask">
+                  <rect x="0" y="0" width="118" height="94" fill="white"></rect>
+                  <text x="69" y="47" dx="-3" font-size="64" font-weight="bold" font-family="system-ui, -apple-system, sans-serif" text-anchor="middle" dominant-baseline="central" fill="black">⇌</text>
+                </mask>
+              </defs>
+              
+              <rect 
+                x="16.5" 
+                y="9.5" 
+                width="95" 
+                height="85" 
+                rx="14" 
+                transform="translate(59 47) skewX(-15) translate(-59 -47)"
+                mask="url(#equilibrium-mask)" 
+                fill="currentColor">
+              </rect>
+            </svg>
+    <span class="fs-4">Swift RPC Server</span>&nbsp;&mdash;&nbsp;<span class='fs-4 fw-thin text-secondary' id='server_name'>localhost</span>
         </a>
         <nav class="d-inline-flex mt-2 mt-md-0 ms-md-auto">
         <a class="me-3 py-2 text-dark text-decoration-none" href="https://github.com/michel4j/swift-rpc/blob/master/README.rst">Docs</a>
@@ -201,7 +204,6 @@ async def index():
         </nav>
         </div>
     </header>
-  
     <div class="row row-cols-1 row-cols-md-4 mb-3 text-center" id="stats">
         <div class="col">
             <div class="card mb-4 rounded-3 shadow-sm">
@@ -286,7 +288,7 @@ async def index():
             try {
                 const response = await fetch('/api/data');
                 const data = await response.json();
-                
+                document.getElementById('server_name').innerText = data.host;
                 document.getElementById('uptime').innerText = formatDuration(data.stats.uptime);
                 document.getElementById('total_requests').innerText = data.stats.total_requests;
                 document.getElementById('total_errors').innerText = data.stats.total_errors;
