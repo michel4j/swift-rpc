@@ -25,9 +25,9 @@ if __name__ == '__main__':
         res.connect('failed', on_err)
         result_list.append(res)
 
-    print()
     while not client.is_ready():
-        time.sleep(.001)
+        logger.info('Waiting for connection ...')
+        time.sleep(1)
 
     results = []
     names = ['Joe', 'Jim', 'Janay', 'John']

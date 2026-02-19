@@ -158,10 +158,6 @@ async def index():
         integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" 
         crossorigin="anonymous">
     <style>
-        .stats { display: flex; gap: 20px; margin-bottom: 20px; }
-        .stat-card { background: white; padding: 15px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); flex: 1; text-align: center; }
-        .stat-card h3 { margin: 0; font-size: 0.9em; color: #666;}
-        .stat-card p { margin: 10px 0 0; font-size: 1.5em; font-weight: bold; }
         .status-ACTIVE { color: #2196F3; font-weight: bold; }
         .status-DONE { color: #4CAF50; font-weight: bold; }
         .status-ERROR { color: #F44336; font-weight: bold; }
@@ -171,66 +167,119 @@ async def index():
     </style>
 </head>
 <body class="p-5 bg-tertiary">
-    <div class="container-fluid">
-    <h1>Swift RPC Server Introspection</h1>
-    
-    <div class="stats" id="stats">
-        <div class="stat-card"><h3>Uptime</h3><p id="uptime">-</p></div>
-        <div class="stat-card"><h3>Total Requests</h3><p id="total_requests">-</p></div>
-        <div class="stat-card"><h3>Errors</h3><p id="total_errors">-</p></div>
-        <div class="stat-card"><h3>Active Workers</h3><p id="active_workers">-</p></div>
+    <div class="container">
+    <header>
+        <div class="d-flex flex-column flex-md-row align-items-center pb-3 mb-4 border-bottom">
+        <a href="/" class="d-flex align-items-center text-dark text-decoration-none">
+            <svg xmlns="http://www.w3.org/2000/svg" width="40" height="32" class="me-2" viewBox="0 0 118 94" role="img">
+  <title>Swift RPC</title>
+  <defs>
+    <mask id="equilibrium-mask">
+      <rect x="0" y="0" width="118" height="94" fill="white"></rect>
+      <text x="69" y="47" dx="-3" font-size="64" font-weight="bold" font-family="system-ui, -apple-system, sans-serif" text-anchor="middle" dominant-baseline="central" fill="black">⇌</text>
+    </mask>
+  </defs>
+  
+  <rect 
+    x="16.5" 
+    y="9.5" 
+    width="95" 
+    height="85" 
+    rx="14" 
+    transform="translate(59 47) skewX(-15) translate(-59 -47)"
+    mask="url(#equilibrium-mask)" 
+    fill="currentColor">
+  </rect>
+</svg>
+<span class="fs-4">Swift RPC Server</span>
+        </a>
+        <nav class="d-inline-flex mt-2 mt-md-0 ms-md-auto">
+        <a class="me-3 py-2 text-dark text-decoration-none" href="https://github.com/michel4j/swift-rpc/blob/master/README.rst">Docs</a>
+        <a class="me-3 py-2 text-dark text-decoration-none" href="https://github.com/michel4j/swift-rpc">Source Code</a>
+        <a class="me-3 py-2 text-dark text-decoration-none" href="https://pypi.org/project/szrpc/">Releases</a>
+        <a class="py-2 text-dark text-decoration-none" href="https://github.com/michel4j/swift-rpc/issues">Issues</a>
+        </nav>
+        </div>
+    </header>
+  
+    <div class="row row-cols-1 row-cols-md-4 mb-3 text-center" id="stats">
+        <div class="col">
+            <div class="card mb-4 rounded-3 shadow-sm">
+                <div class="card-header py-2"><h4 class="my-0 fw-normal">Uptime</h4></div>
+                <div class="card-body"><h1 class="card-title pricing-card-title" id="uptime">-</h1></div>
+            </div>
+        </div>
+        <div class="col">
+            <div class="card mb-4 rounded-3 shadow-sm">
+                <div class="card-header py-2"><h4 class="my-0 fw-normal">Requests</h4></div>
+                <div class="card-body"><h1 class="card-title pricing-card-title" id="total_requests">-</h1></div>
+            </div>
+        </div>
+        <div class="col">
+            <div class="card mb-4 rounded-3 shadow-sm">
+                <div class="card-header py-2"><h4 class="my-0 fw-normal">Errors</h4></div>
+                <div class="card-body"><h1 class="card-title pricing-card-title" id="total_errors">-</h1></div>
+            </div>
+        </div>
+        <div class="col">
+            <div class="card mb-4 rounded-3 shadow-sm">
+                <div class="card-header py-2"><h4 class="my-0 fw-normal">Workers</h4></div>
+                <div class="card-body"><h1 class="card-title pricing-card-title" id="active_workers">-</h1></div>
+            </div>
+        </div>
     </div>
 
-    <h2>Active Calls</h2>
-    <table class="table">
-        <thead>
-            <tr>
-                <th>Request ID</th>
-                <th>Method</th>
-                <th>Worker</th>
-                <th>Status</th>
-                <th>Duration</th>
-            </tr>
-        </thead>
-        <tbody id="active-calls-body"></tbody>
-    </table>
-
-    <h2>Historical Calls</h2>
-    <table class="table">
-        <thead>
-            <tr>
-                <th>Request ID</th>
-                <th>Method</th>
-                <th>Worker</th>
-                <th>Status</th>
-                <th>Duration</th>
-                <th>Result/Error</th>
-            </tr>
-        </thead>
-        <tbody id="historical-calls-body"></tbody>
-    </table>
+    <div class="row">
+        <h2 class="col-12">Call History</h2>
+    </div>
+    <div class="row mb-3">        
+        <table class="col-12 table">
+            <thead>
+                <tr>
+                    <th>Request ID</th>
+                    <th>Method</th>
+                    <th>Worker</th>
+                    <th>Status</th>
+                    <th>Duration</th>
+                </tr>
+            </thead>
+            <tbody id="active-calls-body"></tbody>
+            <tbody id="historical-calls-body"></tbody>
+        </table>
+    </div>
     </div>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js" 
         integrity="sha384-FKyoEForCGlyvwx9Hj09JcYn3nv7wiPVlz7YYwJrWVcXK/BmnVDxM+D2scQbITxI" 
-        crossorigin="anonymous"></script>
+        crossorigin="anonymous">
+    </script>
     <script>
-    
-        function formatDuration(totalSeconds) {
-            const days = Math.floor(totalSeconds / 86400);
-            totalSeconds -= days * 86400;
+        function formatDuration(seconds) {
+            // Ensure the input is a non-negative number
+            seconds = Math.abs(Number(seconds));
         
-            const hours = Math.floor(totalSeconds / 3600);
-            totalSeconds -= hours * 3600;
+            const days = Math.floor(seconds / (24 * 3600));
+            seconds %= (24 * 3600);
+            const hours = Math.floor(seconds / 3600);
+            seconds %= 3600;
+            const minutes = Math.floor(seconds / 60);
+            const remainingSeconds = Math.floor(seconds % 60); // Use Math.floor for whole seconds
         
-            const minutes = Math.floor(totalSeconds / 60);
-            totalSeconds -= minutes * 60;
+            const parts = [];
         
-            const seconds = Math.floor(totalSeconds);
+            if (days > 0) {
+                parts.push(`${days}d`);
+            }
+            if (hours > 0) {
+                parts.push(`${hours}h`);
+            }
+            if (minutes > 0) {
+                parts.push(`${minutes}m`);
+            }
+            if (remainingSeconds > 0 || parts.length === 0) {
+                parts.push(`${remainingSeconds}s`);
+            }
         
-            // Use padStart to ensure two digits for HH, MM, SS
-            const pad = (num) => num.toString().padStart(2, '0');
-        
-            return `${days}:${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
+            return parts.join(' ');
         }
 
         async function updateData() {
@@ -249,7 +298,7 @@ async def index():
                         <td>${c.request_id}</td>
                         <td>${c.method}</td>
                         <td>${c.worker_id}</td>
-                        <td class="status-${c.status}">${c.status}</td>
+                        <td><span class="badge bg-light border status-${c.status}">${c.status}</span></td>
                         <td>${formatDuration((Date.now() / 1000) - c.start_time)}</td>
                     </tr>
                 `).join('');
@@ -260,9 +309,8 @@ async def index():
                         <td>${c.request_id}</td>
                         <td>${c.method}</td>
                         <td>${c.worker_id}</td>
-                        <td><span class="badge bg-light border status-${c.status}">${c.status}</span></td>
+                        <td><span class="badge bg-light border status-${c.status}" title="${c.result}">${c.status}</span></td>
                         <td>${formatDuration(c.duration)}</td>
-                        <td>${c.result}</td>
                     </tr>
                 `).join('');
             } catch (e) {

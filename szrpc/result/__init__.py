@@ -2,6 +2,7 @@ import hashlib
 import time
 from queue import Queue
 from collections import defaultdict
+from typing import Any
 
 
 class SignalObject(object):
@@ -22,7 +23,7 @@ class SignalObject(object):
             for slot, xargs, xkwargs in self.slots.get(signal, []):
                 slot(self, *args, *xargs, **kwargs, **xkwargs)
 
-    def emit(self, signal: str, *args, **kwargs):
+    def trigger(self, signal: str, *args, **kwargs):
         """
         Emit a signal
 
@@ -61,12 +62,20 @@ class SignalObject(object):
 
 
 class ResultMixin(object):
-    def __init__(self, result_id: bytes):
+    identity: str
+    result_id: bytes
+    parts: list
+    results: Any
+    ready: bool
+    failed: bool
+    errors: str
+
+    def setup(self, result_id: bytes):
         self.identity = result_id.decode('utf-8')
         self.result_id = result_id
         self.parts = []
         self.results = None
-        self.errors = None
+        self.errors = ''
         self.ready = False
         self.failed = False
         super().__init__()
@@ -78,7 +87,7 @@ class ResultMixin(object):
         :param info: partial results
         """
         self.parts.append(info)
-        self.emit('update', info)
+        self.trigger('update', info)
 
     def failure(self, error: str):
         """
@@ -89,7 +98,7 @@ class ResultMixin(object):
         self.errors = error
         self.failed = True
         self.ready = True
-        self.emit('failed', error)
+        self.trigger('failed', error)
 
     def done(self, info=None):
         """
@@ -99,7 +108,7 @@ class ResultMixin(object):
         """
         self.results = info if info is not None else self.parts
         self.ready = True
-        self.emit('done', info)
+        self.trigger('done', info)
 
     def is_ready(self) -> bool:
         """
@@ -133,14 +142,14 @@ class ResultMixin(object):
         return f'rep[{token}..] - {ready_text}'
 
 
-class Result(SignalObject, ResultMixin):
+class Result(ResultMixin, SignalObject):
     """
     Result object providing methods for managing results
     """
     __slots__ = ('identity', 'parts', 'results', 'ready', 'failed', 'errors')
 
     def __init__(self, result_id: bytes):
-        ResultMixin.__init__(self, result_id)
+        self.setup(result_id)
         super().__init__()
 
 

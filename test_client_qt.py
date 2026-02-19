@@ -1,31 +1,25 @@
 
 import time
+import sys
 import random
 from threading import Thread
 
-import gi
-gi.require_version('Gtk', '3.0')
-from gi.repository import Gtk, GLib
+from PyQt5.QtWidgets import QApplication
 
 from szrpc import log
 from szrpc.client import Client
 
 # use GObject based result class
-Client.use('szrpc.result.gresult.GResult')
-
+Client.use('szrpc.result.qresult.QResult')
 logger = log.get_module_logger('client')
 
 
-def gtk_heartbeat():
-    print('Gtk Heartbeat ...')
-    return True
-
-
-class App:
+class App(QApplication):
 
     def __init__(self):
         self.results = []
         self.client = Client('tcp://localhost:9990', heartbeat=1)
+        super().__init__(sys.argv)
 
     @staticmethod
     def on_done(res, data):
@@ -70,15 +64,15 @@ class App:
             time.sleep(1)
 
         logger.info("Client done")
-        Gtk.main_quit()
+        self.quit()
 
     def start(self):
         Thread(target=self.run, daemon=True).start()
+        self.exec()
 
 
 if __name__ == '__main__':
     log.log_to_console()
     app = App()
     app.start()
-    Gtk.main()
 

@@ -39,6 +39,7 @@ version = "0.0.0"
 
 [tool.poetry.group.dev.dependencies]
 pygobject = "^3.54.5"
+pyqt5 = "^5.15.11"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0", "poetry-dynamic-versioning>=1.0.0,<2.0.0"]
