@@ -47,7 +47,8 @@ class Client(object):
         """
         :param address: Server address for the client, eg. tcp://localhost:9990
         :param methods: sequence of method names to allow for this client
-        :param heartbeat: heartbeat interval in seconds, if 0, no heartbeat is used (default)
+        :param heartbeat: heartbeat interval in seconds, if 0, no heartbeat is used (default). Allows the client to
+        detect server disconnections.
         """
         self.client_id = get_client_id()
         self.context = zmq.Context()
@@ -65,7 +66,8 @@ class Client(object):
     @classmethod
     def use(cls, result_class: type | str):
         """
-        Swap out the Result Class
+        Swap out the Result Class. Used for integration with different main-loops like
+        Gtk, Qt or other bespoke main loops.
 
         :param result_class: Class object or dotted path string
         """
