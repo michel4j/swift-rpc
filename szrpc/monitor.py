@@ -182,19 +182,9 @@ async def index():
                   <text x="69" y="47" dx="-3" font-size="64" font-weight="bold" font-family="system-ui, -apple-system, sans-serif" text-anchor="middle" dominant-baseline="central" fill="black">⇌</text>
                 </mask>
               </defs>
-              
-              <rect 
-                x="16.5" 
-                y="9.5" 
-                width="95" 
-                height="85" 
-                rx="14" 
-                transform="translate(59 47) skewX(-15) translate(-59 -47)"
-                mask="url(#equilibrium-mask)" 
-                fill="currentColor">
-              </rect>
+              <rect x="16.5" y="9.5" width="95" height="85" rx="14" fill="currentColor" transform="translate(59 47) skewX(-15) translate(-59 -47)" mask="url(#equilibrium-mask)" fill="currentColor"></rect>
             </svg>
-    <span class="fs-4">Swift RPC Server</span>&nbsp;&mdash;&nbsp;<span class='fs-4 fw-thin text-secondary' id='server_name'>localhost</span>
+    <span class="fs-4">Swift RPC Server</span>&nbsp;&mdash;&nbsp;<span class='fs-4 fw-thinner text-primary' id='server_name'>localhost</span>
         </a>
         <nav class="d-inline-flex mt-2 mt-md-0 ms-md-auto">
         <a class="me-3 py-2 text-dark text-decoration-none" href="https://github.com/michel4j/swift-rpc/blob/master/README.rst">Docs</a>
@@ -208,25 +198,25 @@ async def index():
         <div class="col">
             <div class="card mb-4 rounded-3 shadow-sm">
                 <div class="card-header py-2"><h4 class="my-0 fw-normal">Uptime</h4></div>
-                <div class="card-body"><h1 class="card-title pricing-card-title" id="uptime">-</h1></div>
+                <div class="card-body"><h3 class="card-title pricing-card-title" id="uptime">-</h3></div>
             </div>
         </div>
         <div class="col">
             <div class="card mb-4 rounded-3 shadow-sm">
                 <div class="card-header py-2"><h4 class="my-0 fw-normal">Requests</h4></div>
-                <div class="card-body"><h1 class="card-title pricing-card-title" id="total_requests">-</h1></div>
+                <div class="card-body"><h3 class="card-title pricing-card-title" id="total_requests">-</h3></div>
             </div>
         </div>
         <div class="col">
             <div class="card mb-4 rounded-3 shadow-sm">
                 <div class="card-header py-2"><h4 class="my-0 fw-normal">Errors</h4></div>
-                <div class="card-body"><h1 class="card-title pricing-card-title" id="total_errors">-</h1></div>
+                <div class="card-body"><h3 class="card-title pricing-card-title" id="total_errors">-</h3></div>
             </div>
         </div>
         <div class="col">
             <div class="card mb-4 rounded-3 shadow-sm">
                 <div class="card-header py-2"><h4 class="my-0 fw-normal">Workers</h4></div>
-                <div class="card-body"><h1 class="card-title pricing-card-title" id="active_workers">-</h1></div>
+                <div class="card-body"><h3 class="card-title pricing-card-title" id="active_workers">-</h3></div>
             </div>
         </div>
     </div>
