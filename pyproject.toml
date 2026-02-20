@@ -21,7 +21,6 @@ dependencies = [
     "msgpack",
     "fastapi (>=0.129.0,<0.130.0)",
     "uvicorn (>=0.41.0,<0.42.0)",
-    "pyyaml (>=6.0.3,<7.0.0)",
 ]
 
 [project.urls]
