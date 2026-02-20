@@ -15,17 +15,22 @@ classifiers = [
   "License :: OSI Approved :: MIT License",
   "Operating System :: OS Independent",
 ]
-requires-python = ">=3.10,<4.0"
+requires-python = ">=3.9,<4.0"
 dependencies = [
     "pyzmq",
     "msgpack",
-    "fastapi (>=0.129.0,<0.130.0)",
-    "uvicorn (>=0.41.0,<0.42.0)",
 ]
 
 [project.urls]
 Homepage = "https://github.com/michel4j/swift-rpc"
 Issues = "https://github.com/michel4j/swift-rpc/issues"
+
+[project.optional-dependencies]
+dash = ["fastapi (>=0.127.0,<0.130.0)", "uvicorn (>=0.39.0,<0.42.0)"]
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0", "poetry-dynamic-versioning>=1.0.0,<2.0.0"]
+build-backend = "poetry_dynamic_versioning.backend"
 
 [tool.poetry]
 packages = [
@@ -36,14 +41,9 @@ include = [
 ]
 version = "0.0.0"
 
-
 [tool.poetry.group.dev.dependencies]
 pygobject = "^3.54.5"
 pyqt5 = "^5.15.11"
-
-[build-system]
-requires = ["poetry-core>=2.0.0,<3.0.0", "poetry-dynamic-versioning>=1.0.0,<2.0.0"]
-build-backend = "poetry_dynamic_versioning.backend"
 
 [tool.poetry.requires-plugins]
 poetry-dynamic-versioning = { version = ">=1.0.0,<2.0.0", extras = ["plugin"] }

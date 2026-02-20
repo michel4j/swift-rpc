@@ -14,7 +14,13 @@ from enum import Enum
 import msgpack
 import zmq
 from . import log, namer
-from . import monitor as mon
+
+try:
+    from . import monitor as mon
+    DASH_ENABLED = True
+except ImportError:
+    DASH_ENABLED = False
+
 
 logger = log.get_module_logger(__name__)
 
@@ -169,7 +175,7 @@ class Response(object):
     def __str__(self):
         req_id = '-'.join(self.request_id.decode('ascii').split('-')[-2:])
         size = sys.getsizeof(self.content)
-        return f"req[{req_id}] - {self.type.name} {mon.human_bytes(size)}"
+        return f"req[{req_id}] - {self.type.name} {size} Bytes"
 
 
 class Service(object):
@@ -350,9 +356,11 @@ class Server(object):
         self.context = zmq.Context()
         self.manager = WorkerManager(self.service_factory, self.backend_addr, instances=instances)
         self.monitor = None
-        if monitor_port:
+        if DASH_ENABLED and monitor_port:
             self.monitor = mon.Monitor()
             mon.start_monitor_thread(self.monitor, port=monitor_port)
+        elif monitor_port:
+            logger.warning('Dashboard not enabled. Please run "pip install szrpc[dash] to enable it"')
 
     def run(self, balancing=False, proxy: Literal['simple', 'balancing', 'round-robin'] = 'round-robin'):
         """

@@ -381,7 +381,7 @@ async def index():
 def run_introspection_server(monitor: Monitor, host: str = "0.0.0.0", port: int = 8080):
     global monitor_instance
     monitor_instance = monitor
-    logger.info(f"Starting introspection at {host}:{port}")
+    logger.info(f"Starting dashboard at {host}:{port}")
     uvicorn.run(app, host=host, port=port, log_level="warning")
 
 

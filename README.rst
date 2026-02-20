@@ -23,7 +23,13 @@ Installing inside a virtual environment as follows
 
     $ python -m venv myproject
     $ source myproject/bin/activate
-    (myproject) $ pip3 install szrpc
+    (myproject) $ pip install szrpc
+
+If you plan to use the server dashboard, then install the `dash` extras by replacing the last command with:
+
+::
+
+    (myproject) $ pip install szrpc[dash]
 
 
 Write your first RPC Service
@@ -100,11 +106,13 @@ To start the server with more than one worker on the local host, modify the `ins
 It is possible to start the server with `instances = 0` however, it will obviously not be able to handle any requests
 until at least one worker is started.
 
-Server Introspection
-====================
-Swift RPC provides a web-based introspection capability that allows administrators to see active and historical calls, error messages, and basic statistics about the server.
+Server Dashboard
+================
+Swift RPC provides a web-based introspection capability that allows administrators to see active and historical calls,
+error messages, and basic statistics about the server.
 
-To enable introspection, provide a `monitor_port` when creating the server:
+To enable introspection, make sure the [dash] extras are installed (`pip install szrpc[dash]`), then provide a
+`monitor_port` when creating the server:
 
 .. code-block:: python
 
