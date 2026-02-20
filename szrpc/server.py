@@ -37,7 +37,7 @@ def get_client_id():
     """
     host = socket.getfqdn().split('.')[0].lower()
     client = str(uuid.uuid1())[:8]
-    return f'{host}/{client}'.encode('ascii')
+    return f'{host}-{client}'.encode('ascii')
 
 
 class Request(object):
@@ -167,7 +167,7 @@ class Response(object):
         ).parts()
 
     def __str__(self):
-        req_id = '/'.join(self.request_id.decode('ascii').split('/')[-2:])
+        req_id = '-'.join(self.request_id.decode('ascii').split('-')[-2:])
         size = sys.getsizeof(self.content)
         return f"req[{req_id}] - {self.type.name} {mon.human_bytes(size)}"
 

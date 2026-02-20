@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta
 import socket
 import sys
 import threading
@@ -12,6 +13,8 @@ from fastapi.responses import HTMLResponse
 from . import log
 
 logger = log.get_module_logger("server")
+
+MAX_HISTORY_RECORDS = 500
 
 
 def human_bytes(size: int) -> str:
@@ -39,31 +42,36 @@ class CallRecord:
         self.signature = log.log_call(method, (), kwargs)
         self.worker_id = worker_id
         self.start_time = time.time()
+        self.date_time = datetime.now().astimezone()
         self.end_time: Optional[float] = None
         self.duration: Optional[float] = None
         self.status = "ACTIVE"
         self.sent_bytes = 0
         self.num_updates = 0
-        self.result: Any = None
+        self.result: list[Any] = []
 
-    def to_dict(self) -> Dict[str, Any]:
-        return {
+    def to_dict(self, include_details: bool = False) -> Dict[str, Any]:
+        data = {
             "request_id": self.request_id,
             "client_id": self.client_id,
             "method": self.signature,
             "worker_id": self.worker_id,
+            "date_time": self.date_time.strftime("%Y-%m-%d %H:%M:%S %Z"),
             "start_time": self.start_time,
             "end_time": self.end_time,
             "duration": self.duration,
             "status": self.status,
             "sent_bytes": self.sent_bytes,
             "updates": self.num_updates,
-            "result": str(self.result) if self.result is not None else None
         }
+        if include_details:
+            data["kwargs"] = self.kwargs
+            data["results"] = self.result
+        return data
 
 
 class Monitor:
-    def __init__(self, history_size: int = 100):
+    def __init__(self, history_size: int = MAX_HISTORY_RECORDS):
         self.lock = threading.Lock()
         self.active_calls: Dict[str, CallRecord] = {}
         self.historical_calls: deque[CallRecord] = deque(maxlen=history_size)
@@ -92,7 +100,7 @@ class Monitor:
                 record = self.active_calls[request_id]
                 record.end_time = time.time()
                 record.duration = record.end_time - record.start_time
-                record.result = result
+                record.result.append(result)
 
                 if status == "UPDATE":
                     record.num_updates += 1
@@ -101,8 +109,6 @@ class Monitor:
                     self.stats["total_errors"] += 1
                 elif status in ["DONE", "UPDATE"]:
                     record.sent_bytes += sys.getsizeof(result)
-                    result_size = human_bytes(record.sent_bytes)
-                    record.result = f'Updates: {record.num_updates}, Bytes: {result_size}'
 
                 if status in ['DONE', 'ERROR']:
                     record.status = status
@@ -135,6 +141,16 @@ class Monitor:
                 "workers": list(active_workers.keys())
             }
 
+    def get_call_details(self, request_id: str) -> Optional[Dict[str, Any]]:
+        with self.lock:
+            if request_id in self.active_calls:
+                return self.active_calls[request_id].to_dict(include_details=True)
+            
+            for call in self.historical_calls:
+                if call.request_id == request_id:
+                    return call.to_dict(include_details=True)
+            return None
+
 
 app = FastAPI(title="Swift RPC Introspection")
 monitor_instance: Optional[Monitor] = None
@@ -145,6 +161,15 @@ async def get_data():
     if monitor_instance:
         return monitor_instance.get_data()
     return {"error": "Monitor not initialized"}
+
+
+@app.get("/api/details/{request_id}")
+async def get_details(request_id: str):
+    if monitor_instance:
+        details = monitor_instance.get_call_details(request_id)
+        if details:
+            return details
+    return {"error": "Request not found"}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -166,7 +191,7 @@ async def index():
         .status-ERROR { color: #F44336; font-weight: bold; }
         .table { --bs-table-bg: transparent !important; background-color: transparent !important;}
         td { font-family: monospace; font-size: 0.8em; }
-        pre { white-space: pre-wrap; word-wrap: break-word; font-size: 0.8em; margin: 0; max-height: 100px; overflow-y: auto; }
+        pre { white-space: pre-wrap; word-wrap: break-word; font-size: 0.8em; margin: 0; max-height: 500px; overflow-y: auto; }
     </style>
 </head>
 <body class="p-5 bg-tertiary">
@@ -209,7 +234,7 @@ async def index():
         </div>
         <div class="col">
             <div class="card mb-4 rounded-3 shadow-sm">
-                <div class="card-header py-2"><h4 class="my-0 fw-normal">Errors</h4></div>
+                <div class="card-header py-2"><h4 class="my-0 fw-normal">Failed</h4></div>
                 <div class="card-body"><h3 class="card-title pricing-card-title" id="total_errors">-</h3></div>
             </div>
         </div>
@@ -228,6 +253,7 @@ async def index():
         <table class="col-12 table">
             <thead>
                 <tr>
+                    <th>Time</th>                
                     <th>Request ID</th>
                     <th>Method</th>
                     <th>Worker</th>
@@ -240,6 +266,22 @@ async def index():
         </table>
     </div>
     </div>
+
+    <!-- Modal -->
+    <div class="modal fade" id="detailsModal" tabindex="-1" aria-hidden="true">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+          <div class="modal-header text-bg-primary modal-lg" data-bs-theme="dark">
+            <h5 class="modal-title">Job Details</h5>
+            <button type="button" class="btn-close text-white" data-bs-dismiss="modal" aria-label="Close"></button>
+          </div>
+          <div class="modal-body">
+            <pre id="modal-content"></pre>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js" 
         integrity="sha384-FKyoEForCGlyvwx9Hj09JcYn3nv7wiPVlz7YYwJrWVcXK/BmnVDxM+D2scQbITxI" 
         crossorigin="anonymous">
@@ -274,6 +316,22 @@ async def index():
             return parts.join(' ');
         }
 
+        async function showDetails(requestId) {
+            const modalElement = document.getElementById('detailsModal');
+            const modal = bootstrap.Modal.getOrCreateInstance(modalElement);
+            document.getElementById('modal-content').innerText = 'Loading...';
+            modal.show();
+            
+            try {
+                console.log(requestId);
+                const response = await fetch(`/api/details/${requestId}`);
+                const data = await response.json();
+                document.getElementById('modal-content').innerText = JSON.stringify(data, null, 2);
+            } catch (e) {
+                document.getElementById('modal-content').innerText = 'Error loading details';
+            }
+        }
+
         async function updateData() {
             try {
                 const response = await fetch('/api/data');
@@ -287,7 +345,8 @@ async def index():
                 const activeBody = document.getElementById('active-calls-body');
                 activeBody.innerHTML = data.active_calls.map(c => `
                     <tr>
-                        <td>${c.request_id}</td>
+                        <td>${c.date_time}</td>                    
+                        <td><a href="#" onclick="showDetails('${c.request_id}'); return false;">${c.request_id}</a></td>
                         <td>${c.method}</td>
                         <td>${c.worker_id}</td>
                         <td><span class="badge bg-light border status-${c.status}">${c.status}</span></td>
@@ -298,10 +357,11 @@ async def index():
                 const historicalBody = document.getElementById('historical-calls-body');
                 historicalBody.innerHTML = data.historical_calls.map(c => `
                     <tr>
-                        <td>${c.request_id}</td>
+                        <td>${c.date_time}</td>   
+                        <td><a href="#" onclick="showDetails('${c.request_id}'); return false;">${c.request_id}</a></td>
                         <td>${c.method}</td>
                         <td>${c.worker_id}</td>
-                        <td><span class="badge bg-light border status-${c.status}" title="${c.result}">${c.status}</span></td>
+                        <td><span class="badge bg-light border status-${c.status}">${c.status}</span></td>
                         <td>${formatDuration(c.duration)}</td>
                     </tr>
                 `).join('');

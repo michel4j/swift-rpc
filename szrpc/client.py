@@ -78,7 +78,7 @@ class Client(object):
         Generate a unique request ID
         """
         call_id = str(uuid.uuid1())[:8]
-        return f'{self.client_id.decode("ascii")}/{call_id}'.encode('ascii')
+        return f'{self.client_id.decode("ascii")}-{call_id}'.encode('ascii')
 
     def start(self, introspect=True):
         """
