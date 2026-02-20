@@ -342,13 +342,18 @@ def start_worker(address: str, factory: ServiceFactory):
 
 
 class Server(object):
-    def __init__(self, service_factory: ServiceFactory, ports: tuple = (9990, 9991), instances: int = 1, monitor_port: int = None):
+    def __init__(
+            self,
+            service_factory: ServiceFactory,
+            ports: tuple = (9990, 9991),
+            instances: int = 1,
+            monitor_port: int = None
+    ):
         """
         :param service_factory: A Service factory which creates service instances
-        :param ports: a pair of ports for frontend and backend
+        :param ports: a tuple of ports for frontend, backend
         :param instances: Number of workers to start on server. Additional workers can be started on other hosts
-        :param monitor_port: Port for the introspection web server. If None, introspection is disabled.
-
+        :param monitor_port: alternate way to specify a monitor port
         """
         self.service_factory = service_factory
         self.frontend_addr = f'tcp://*:{ports[0]}'
@@ -356,6 +361,7 @@ class Server(object):
         self.context = zmq.Context()
         self.manager = WorkerManager(self.service_factory, self.backend_addr, instances=instances)
         self.monitor = None
+
         if DASH_ENABLED and monitor_port:
             self.monitor = mon.Monitor()
             mon.start_monitor_thread(self.monitor, port=monitor_port)
