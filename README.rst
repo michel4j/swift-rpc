@@ -118,7 +118,7 @@ Once the server is running, you can access the introspection dashboard by naviga
 - **Errors**: Number of failed requests.
 - **Active Workers**: Number of currently connected workers.
 - **Active Calls**: List of requests currently being processed.
-- **Historical Calls**: List of recently completed requests with their results or error messages.
+- **Historical Calls**: List of recently completed requests with their call arguments, results or error messages.
 
 Starting External Workers
 -------------------------

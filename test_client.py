@@ -8,7 +8,7 @@ from szrpc.client import Client
 logger = log.get_module_logger('client')
 if __name__ == '__main__':
     log.log_to_console()
-    client = Client('tcp://localhost:9990', heartbeat=1)
+    client = Client('tcp://localhost:9990', heartbeat=0)
 
     def on_done(res, data):
         logger.info(f"DONE: {res}, {data!r}")

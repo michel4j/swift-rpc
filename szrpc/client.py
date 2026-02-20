@@ -140,7 +140,7 @@ class Client(object):
         self.last_ping = time.time()
 
         while True:
-            ping_pending = (time.time() - self.heartbeat > self.last_ping)
+            ping_pending = self.heartbeat > 0 and (time.time() - self.heartbeat > self.last_ping)
             if socket.poll(10, zmq.POLLIN):
                 reply_data = socket.recv_multipart()
                 self.last_available = time.time()
@@ -193,13 +193,14 @@ class Client(object):
                 time.sleep(0.01)
 
             # check connection
-            has_heartbeat = self.last_available + 2 * self.heartbeat > time.time()
-            if self.ready and not has_heartbeat:
-                self.ready = False
-                logger.error('Server connection lost!')
-            elif not self.ready and has_heartbeat and self.remote_methods:
-                self.ready = True
-                logger.info('Server connection restored!')
+            if self.heartbeat > 0:
+                has_heartbeat = self.last_available + 2 * self.heartbeat > time.time()
+                if self.ready and not has_heartbeat:
+                    self.ready = False
+                    logger.error('Server connection lost!')
+                elif not self.ready and has_heartbeat and self.remote_methods:
+                    self.ready = True
+                    logger.info('Server connection restored!')
             time.sleep(0.01)
 
     def __getattr__(self, name):
@@ -217,4 +218,3 @@ def use(result_class: type | str):
     """
 
     Client.use(result_class)
-
