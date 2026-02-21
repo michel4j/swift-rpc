@@ -39,7 +39,7 @@ class CallRecord:
         self.client_id = client_id
         self.method = method
         self.kwargs = kwargs
-        self.signature = log.log_call(method, (), kwargs)
+        self.signature = ''
         self.worker_id = worker_id
         self.start_time = time.time()
         self.date_time = datetime.now().astimezone()
@@ -54,7 +54,7 @@ class CallRecord:
         data = {
             "request_id": self.request_id,
             "client_id": self.client_id,
-            "method": self.signature,
+            "method": f'{self.method}({self.signature})',
             "worker_id": self.worker_id,
             "date_time": self.date_time.strftime("%Y-%m-%d %H:%M:%S %Z"),
             "start_time": self.start_time,
@@ -262,8 +262,8 @@ async def index():
                 <thead>
                     <tr>
                         <th>Time</th>                
-                        <th>Request ID</th>
-                        <th>Method</th>
+                        <th>Task ID</th>
+                        <th>Task Type</th>
                         <th>Worker</th>
                         <th>Status</th>
                         <th>Duration</th>
