@@ -265,6 +265,27 @@ class ServiceFactory(object):
         self.args = args
         self.kwargs = kwargs
 
+    def get_description(self) -> str:
+        """
+        Get a description of the service type from the class name and the docstring
+        :return: description string
+        """
+        if not self.service_type.__doc__:
+            return self.service_type.__name__
+
+        description = ' '.join(self.service_type.__doc__.split())
+        return f'{self.service_type.__name__} - {description}'
+
+    def get_methods(self) -> tuple:
+        """
+        Get a list of allowed remote methods for the service type
+        :return: list of method names
+        """
+        return tuple(
+            re.sub('^remote__', '', attr)
+            for attr in dir(self.service_type) if attr.startswith('remote__')
+        )
+
     def new(self):
         """
         Create a new Service instance
@@ -357,7 +378,14 @@ class Server(object):
         self.manager = WorkerManager(self.service_factory, self.backend_addr, instances=instances)
         self.monitor = None
         if DASH_ENABLED and monitor_port:
-            self.monitor = mon.Monitor()
+            info = {
+                'host': socket.getfqdn(),
+                'frontend': self.frontend_addr,
+                'backend': self.backend_addr,
+                'description': self.service_factory.get_description(),
+                'methods': self.service_factory.get_methods()
+            }
+            self.monitor = mon.Monitor(service_info=info)
             mon.start_monitor_thread(self.monitor, port=monitor_port)
         elif monitor_port:
             logger.warning('Dashboard not enabled. Please run "pip install szrpc[dash] to enable it"')

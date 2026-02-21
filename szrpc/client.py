@@ -93,7 +93,6 @@ class Client(object):
         if introspect:
             res = self.call_remote('client_config')
             res.connect('done', self.setup)
-            print(res)
         else:
             self.ready = True
             logger.debug(f'~> {self.url}... Ready!')

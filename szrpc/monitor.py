@@ -71,11 +71,12 @@ class CallRecord:
 
 
 class Monitor:
-    def __init__(self, history_size: int = MAX_HISTORY_RECORDS):
+    def __init__(self, service_info: dict, history_size: int = MAX_HISTORY_RECORDS):
         self.lock = threading.Lock()
         self.active_calls: Dict[str, CallRecord] = {}
         self.historical_calls: deque[CallRecord] = deque(maxlen=history_size)
         self.host = socket.getfqdn().split('.')[0].upper()
+        self.service_info = service_info
         self.stats = {
             "total_requests": 0,
             "total_errors": 0,
@@ -129,7 +130,7 @@ class Monitor:
             self.workers = active_workers
 
             return {
-                "host": self.host,
+                **self.service_info,
                 "active_calls": [c.to_dict() for c in self.active_calls.values()],
                 "historical_calls": [c.to_dict() for c in reversed(self.historical_calls)],
                 "stats": {
@@ -186,18 +187,20 @@ async def index():
         integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" 
         crossorigin="anonymous">
     <style>
-        .status-ACTIVE { color: #2196F3; font-weight: bold; }
-        .status-DONE { color: #4CAF50; font-weight: bold; }
-        .status-ERROR { color: #F44336; font-weight: bold; }
+        .status-ACTIVE { color: var(--bs-primary); font-weight: bold; }
+        .status-DONE { color: var(--bs-success); font-weight: bold; }
+        .status-ERROR { color: var(--bs-danger); font-weight: bold; }
         .table { --bs-table-bg: transparent !important; background-color: transparent !important;}
-        td { font-family: monospace; font-size: 0.8em; }
+        td { font-family: monospace; font-size: 0.9em; }
+        #server_info { font-size: 0.8em; opacity: 0.6; column-gap: 1em;}
+        .server-value { font-family: monospace; color: var(--bs-primary);}
         pre { white-space: pre-wrap; word-wrap: break-word; font-size: 0.8em; margin: 0; max-height: 500px; overflow-y: auto; }
     </style>
 </head>
 <body class="p-5 bg-tertiary">
     <div class="container">
     <header>
-        <div class="d-flex flex-column flex-md-row align-items-center pb-3 mb-4 border-bottom">
+        <div class="d-flex flex-column flex-md-row align-items-center pb-3 mb-3 border-bottom">
         <a href="/" class="d-flex align-items-center text-dark text-decoration-none">
             <svg xmlns="http://www.w3.org/2000/svg" width="40" height="32" class="me-2" viewBox="0 0 118 94" role="img">
               <title>Swift RPC</title>
@@ -209,62 +212,67 @@ async def index():
               </defs>
               <rect x="16.5" y="9.5" width="95" height="85" rx="14" fill="currentColor" transform="translate(59 47) skewX(-15) translate(-59 -47)" mask="url(#equilibrium-mask)" fill="currentColor"></rect>
             </svg>
-    <span class="fs-4">Swift RPC Server</span>&nbsp;&mdash;&nbsp;<span class='fs-4 fw-thinner text-primary' id='server_name'>localhost</span>
+            <span class="fs-4">Swift RPC Server</span>&nbsp;&mdash;&nbsp;<span class='fs-4 fw-light text-primary' id='server_name'>localhost</span>
         </a>
         <nav class="d-inline-flex mt-2 mt-md-0 ms-md-auto">
-        <a class="me-3 py-2 text-dark text-decoration-none" href="https://github.com/michel4j/swift-rpc/blob/master/README.rst">Docs</a>
-        <a class="me-3 py-2 text-dark text-decoration-none" href="https://github.com/michel4j/swift-rpc">Source Code</a>
-        <a class="me-3 py-2 text-dark text-decoration-none" href="https://pypi.org/project/szrpc/">Releases</a>
-        <a class="py-2 text-dark text-decoration-none" href="https://github.com/michel4j/swift-rpc/issues">Issues</a>
+            <a class="me-3 py-2 text-dark text-decoration-none" href="https://github.com/michel4j/swift-rpc/blob/master/README.rst">Docs</a>
+            <a class="me-3 py-2 text-dark text-decoration-none" href="https://github.com/michel4j/swift-rpc">Source Code</a>
+            <a class="me-3 py-2 text-dark text-decoration-none" href="https://pypi.org/project/szrpc/">Releases</a>
+            <a class="py-2 text-dark text-decoration-none" href="https://github.com/michel4j/swift-rpc/issues">Issues</a>
         </nav>
+        </div>
+        <div class="d-flex flex-column pb-3 mb-4 border-bottom">
+            <div class="lead" id="server_description"></div>
+            <div class="d-flex flex-row flex-wrap text-secondary" id="server_info"></div>
         </div>
     </header>
     <div class="row row-cols-1 row-cols-md-4 mb-3 text-center" id="stats">
         <div class="col">
-            <div class="card mb-4 rounded-3 shadow-sm">
+            <div class="card mb-4 rounded-3 text-primary-emphasis bg-primary-subtle shadow-sm">
                 <div class="card-header py-2"><h4 class="my-0 fw-normal">Uptime</h4></div>
-                <div class="card-body"><h3 class="card-title pricing-card-title" id="uptime">-</h3></div>
+                <div class="card-body"><span class="fs-2 fw-light" id="uptime">-</span></div>
             </div>
         </div>
         <div class="col">
-            <div class="card mb-4 rounded-3 shadow-sm">
+            <div class="card mb-4 rounded-3 text-info-emphasis bg-info-subtle shadow-sm">
                 <div class="card-header py-2"><h4 class="my-0 fw-normal">Requests</h4></div>
-                <div class="card-body"><h3 class="card-title pricing-card-title" id="total_requests">-</h3></div>
+                <div class="card-body"><span class="fs-2 fw-light" id="total_requests">-</span></div>
             </div>
         </div>
         <div class="col">
-            <div class="card mb-4 rounded-3 shadow-sm">
+            <div class="card mb-4 rounded-3 text-danger-emphasis bg-danger-subtle shadow-sm">
                 <div class="card-header py-2"><h4 class="my-0 fw-normal">Failed</h4></div>
-                <div class="card-body"><h3 class="card-title pricing-card-title" id="total_errors">-</h3></div>
+                <div class="card-body"><span class="fs-2 fw-light" id="total_errors">-</span></div>
             </div>
         </div>
         <div class="col">
             <div class="card mb-4 rounded-3 shadow-sm">
                 <div class="card-header py-2"><h4 class="my-0 fw-normal">Workers</h4></div>
-                <div class="card-body"><h3 class="card-title pricing-card-title" id="active_workers">-</h3></div>
+                <div class="card-body"><span class="fs-2 fw-light" id="active_workers">-</span></div>
             </div>
         </div>
     </div>
 
     <div class="row">
-        <h2 class="col-12">Call History</h2>
+        <div class="col-12 lead">Call History</div>
     </div>
-    <div class="row mb-3">        
-        <table class="col-12 table">
-            <thead>
-                <tr>
-                    <th>Time</th>                
-                    <th>Request ID</th>
-                    <th>Method</th>
-                    <th>Worker</th>
-                    <th>Status</th>
-                    <th>Duration</th>
-                </tr>
-            </thead>
-            <tbody id="active-calls-body"></tbody>
-            <tbody id="historical-calls-body"></tbody>
-        </table>
-    </div>
+    <div class="row mb-3">
+        <div class="col-12">       
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>Time</th>                
+                        <th>Request ID</th>
+                        <th>Method</th>
+                        <th>Worker</th>
+                        <th>Status</th>
+                        <th>Duration</th>
+                    </tr>
+                </thead>
+                <tbody id="active-calls-body"></tbody>
+                <tbody id="historical-calls-body"></tbody>
+            </table>
+        </div>
     </div>
 
     <!-- Modal -->
@@ -281,7 +289,7 @@ async def index():
         </div>
       </div>
     </div>
-
+    </div>
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js" 
         integrity="sha384-FKyoEForCGlyvwx9Hj09JcYn3nv7wiPVlz7YYwJrWVcXK/BmnVDxM+D2scQbITxI" 
         crossorigin="anonymous">
@@ -337,11 +345,19 @@ async def index():
                 const response = await fetch('/api/data');
                 const data = await response.json();
                 document.getElementById('server_name').innerText = data.host;
+                document.getElementById('server_description').innerText = data.description;
                 document.getElementById('uptime').innerText = formatDuration(data.stats.uptime);
                 document.getElementById('total_requests').innerText = data.stats.total_requests;
                 document.getElementById('total_errors').innerText = data.stats.total_errors;
                 document.getElementById('active_workers').innerText = data.stats.active_workers_count;
 
+                const serverInfo = document.getElementById('server_info');
+                serverInfo.innerHTML = `
+                    <div>frontend:&nbsp;<span class="server-value">${data.frontend}</span></div>
+                    <div>backend:&nbsp;<span class="server-value">${data.backend}</span></div>
+                    <div>methods:&nbsp;<span class="server-value">${data.methods.join(', ')}</span></div>
+                `;
+                
                 const activeBody = document.getElementById('active-calls-body');
                 activeBody.innerHTML = data.active_calls.map(c => `
                     <tr>

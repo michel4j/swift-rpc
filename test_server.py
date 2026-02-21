@@ -9,6 +9,9 @@ logger = log.get_module_logger(__name__)
 
 
 class MyService(Service):
+    """
+    Example Service for Testing
+    """
 
     def __init__(self, arg1=1, arg2=2, arg3=3.3, arg4='four'):
         super().__init__()
