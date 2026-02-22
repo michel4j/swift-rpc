@@ -122,6 +122,30 @@ class Monitor:
         with self.lock:
             self.workers[worker_id] = time.time()
 
+    def clear_workers(self, workers):
+        """
+        Remove all active tasks associated with removed workers (e.g. when they disconnect)
+        :param workers: removed workers
+        """
+        with self.lock:
+            to_remove = []
+            for record_id, record in self.active_calls.items():
+                worker_id = record.worker_id.encode('utf-8')
+                if worker_id in workers:
+                    to_remove.append(record_id)
+
+            for record_id in to_remove:
+                if record_id not in self.active_calls:
+                    continue
+                record = self.active_calls.pop(record_id)
+                record.end_time = time.time()
+                record.duration = record.end_time - record.start_time
+                record.result.append('Worker lost connection')
+                record.status = 'ERROR'
+                self.stats["total_errors"] += 1
+                to_remove.append(record_id)
+                self.historical_calls.append(record)
+
     def get_data(self) -> Dict[str, Any]:
         with self.lock:
             now = time.time()
