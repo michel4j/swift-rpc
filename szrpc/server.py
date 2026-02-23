@@ -2,7 +2,6 @@ import re
 import os
 import sys
 import time
-import uuid
 import queue
 import socket
 
@@ -35,15 +34,6 @@ class ResponseType(Enum):
     ERROR = 3
     HEARTBEAT = 4
     READY = 5
-
-
-def get_client_id():
-    """
-    Generate a unique client ID
-    """
-    host = socket.getfqdn().split('.')[0].lower()
-    client = str(uuid.uuid1())[:8]
-    return f'{host}-{client}'.encode('ascii')
 
 
 class Request(object):
