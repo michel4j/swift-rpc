@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import functools
+import socket
 import time
 import uuid
 import importlib
@@ -11,7 +12,7 @@ import zmq
 
 from . import log
 from .result import Result
-from .server import ResponseType, Request, Response, get_client_id
+from .server import ResponseType, Request, Response
 
 logger = log.get_module_logger('szrpc')
 
@@ -43,14 +44,16 @@ class Client(object):
 
     RESULT_CLASS = Result
 
-    def __init__(self, address, methods=(), heartbeat: int = 0):
+    def __init__(self, address, methods=(), heartbeat: int = 0, client_id: bytes = None):
         """
         :param address: Server address for the client, eg. tcp://localhost:9990
         :param methods: sequence of method names to allow for this client
         :param heartbeat: heartbeat interval in seconds, if 0, no heartbeat is used (default). Allows the client to
         detect server disconnections.
+        :param client_id: client identifier slug. If not provided a new one will be generated. Must be unique between
+        simultaneously connected clients. use the Client.create_id() class method to generate compatible unique ids.
         """
-        self.client_id = get_client_id()
+        self.client_id = client_id if client_id else self.create_id()
         self.context = zmq.Context()
         self.url = address
         self.heartbeat = heartbeat
@@ -64,6 +67,15 @@ class Client(object):
         self.start(introspect=(not methods))
 
     @classmethod
+    def create_id(cls) -> bytes:
+        """
+        Generate a unique client ID
+        """
+        host = socket.getfqdn().split('.')[0].lower()
+        client = str(uuid.uuid1())[:8]
+        return f'{host}-{client}'.encode('ascii')
+
+    @classmethod
     def use(cls, result_class: type | str):
         """
         Swap out the Result Class. Used for integration with different main-loops like
@@ -74,6 +86,12 @@ class Client(object):
         if isinstance(result_class, str):
             result_class = load_class(result_class)
         cls.RESULT_CLASS = result_class
+
+    def get_id(self) -> bytes:
+        """
+        Get the client ID
+        """
+        return self.client_id
 
     def create_request_id(self):
         """
@@ -219,3 +237,4 @@ def use(result_class: type | str):
     """
 
     Client.use(result_class)
+
