@@ -40,6 +40,7 @@ class App(QApplication):
         self.results.append(res)
 
     def run(self):
+        start_time = time.time()
         while not self.client.is_ready():
             logger.info('Waiting for connection ...')
             time.sleep(1)
@@ -59,11 +60,7 @@ class App(QApplication):
             self.results = [res for res in self.results if not res.is_ready()]
             time.sleep(0.1)
 
-        # Wait for 20 seconds to test the heartbeat
-        for i in range(20):
-            time.sleep(1)
-
-        logger.info("Client done")
+        logger.info(f"Client done in {time.time() - start_time:.2f} seconds")
         self.quit()
 
     def start(self):

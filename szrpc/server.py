@@ -265,6 +265,27 @@ class ServiceFactory(object):
         self.args = args
         self.kwargs = kwargs
 
+    def get_description(self) -> str:
+        """
+        Get a description of the service type from the class name and the docstring
+        :return: description string
+        """
+        if not self.service_type.__doc__:
+            return self.service_type.__name__
+
+        description = ' '.join(self.service_type.__doc__.split())
+        return f'{self.service_type.__name__} - {description}'
+
+    def get_methods(self) -> tuple:
+        """
+        Get a list of allowed remote methods for the service type
+        :return: list of method names
+        """
+        return tuple(
+            re.sub('^remote__', '', attr)
+            for attr in dir(self.service_type) if attr.startswith('remote__')
+        )
+
     def new(self):
         """
         Create a new Service instance
@@ -363,7 +384,14 @@ class Server(object):
         self.monitor = None
 
         if DASH_ENABLED and monitor_port:
-            self.monitor = mon.Monitor()
+            info = {
+                'host': socket.getfqdn(),
+                'frontend': self.frontend_addr,
+                'backend': self.backend_addr,
+                'description': self.service_factory.get_description(),
+                'methods': self.service_factory.get_methods()
+            }
+            self.monitor = mon.Monitor(service_info=info)
             mon.start_monitor_thread(self.monitor, port=monitor_port)
         elif monitor_port:
             logger.warning('Dashboard not enabled. Please run "pip install szrpc[dash] to enable it"')
@@ -400,6 +428,9 @@ class Server(object):
         backend = self.context.socket(back)
         frontend.bind(self.frontend_addr)
         backend.bind(self.backend_addr)
+        logger.info(f'Listening for tasks from: {self.frontend_addr}')
+        logger.info(f'Listening for workers at: {self.backend_addr}')
+
         self.manager.start_workers()
         return frontend, backend
 
@@ -438,6 +469,15 @@ class Server(object):
             except Exception as e:
                 logger.error(f"Failed to record request in monitor: {e}")
 
+    def _monitor_cleanup(self, workers):
+        """
+        Remove active jobs if their workers disappear. This is called when a worker is removed from the pool due to
+        inactivity or failure.
+        :param workers: sequence of workers to remove from the monitor
+        """
+        if self.monitor:
+            self.monitor.clear_workers(workers)
+
     def simple_proxy(self):
         """
         A simple proxy which forwards all messages from the front-end to the back-end in round-robin fashion.
@@ -470,7 +510,7 @@ class Server(object):
                     workers[worker] = time.time()
                     if worker_is_new:
                         worker_queue.append(worker)
-                        logger.debug(f'Workers [{len(workers):4d}], + : {worker.decode("utf-8")}')
+                        logger.info(f'Workers [{len(workers):4d}], + : {worker.decode("utf-8")}')
                     self._process_response(worker, reply, frontend)
 
                 # check and expire workers who haven't chatted in while
@@ -480,7 +520,8 @@ class Server(object):
                 worker_queue = [w for w in worker_queue if w in workers]
                 if removed:
                     removed_workers = ', '.join([w.decode('utf-8') for w in removed])
-                    logger.debug(f'Workers [{len(workers):4d}], - : {removed_workers}')
+                    logger.warning(f'Workers [{len(workers):4d}], - : {removed_workers}')
+                    self._monitor_cleanup(removed)
 
                 if workers and not backend_ready:
                     # Poll for clients now that a worker is available and backend was not ready
@@ -559,6 +600,7 @@ class Server(object):
                         removed_workers = ', '.join([w.decode('utf-8') for w in removed])
                         logger.debug(f'Workers [{len(workers):4d}], - : {removed_workers}')
                         community.difference_update(removed)
+                        self._monitor_cleanup(removed)
 
                 if frontend in sockets:
                     # Get next client request, route to last-used worker, the oldest item in workers dictionary
@@ -595,12 +637,14 @@ class WorkerManager(object):
         Start subprocesses for each worker
         :return:
         """
-        logger.info(f'Connecting {self.instances} worker(s) to {self.backend_addr}')
+
         self.processes = []
         for i in range(self.instances):
             p = Process(target=start_worker, args=(self.backend_addr, self.factory))
             p.start()
             self.processes.append(p)
+        if self.instances:
+            logger.info(f'Connected {self.instances} worker(s) to {self.backend_addr}')
 
     def wait_for_workers(self):
         """
