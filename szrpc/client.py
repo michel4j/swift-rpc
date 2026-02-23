@@ -44,7 +44,7 @@ class Client(object):
 
     RESULT_CLASS = Result
 
-    def __init__(self, address, methods=(), heartbeat: int = 0, client_id: bytes = None):
+    def __init__(self, address, methods=(), heartbeat: int = 0, client_id: str = None):
         """
         :param address: Server address for the client, eg. tcp://localhost:9990
         :param methods: sequence of method names to allow for this client
@@ -53,7 +53,7 @@ class Client(object):
         :param client_id: client identifier slug. If not provided a new one will be generated. Must be unique between
         simultaneously connected clients. use the Client.create_id() class method to generate compatible unique ids.
         """
-        self.client_id = client_id if client_id else self.create_id()
+        self.client_id = self.create_id()
         self.context = zmq.Context()
         self.url = address
         self.heartbeat = heartbeat
