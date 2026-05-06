@@ -18,7 +18,7 @@ class SignalObject(object):
         :return:
         """
 
-        if not self.signals.empty():
+        while not self.signals.empty():
             signal, args, kwargs = self.signals.get()
             for slot, xargs, xkwargs in self.slots.get(signal, []):
                 slot(self, *args, *xargs, **kwargs, **xkwargs)
