@@ -14,7 +14,7 @@ class SignalObject(object):
 
     def process(self):
         """
-        Run all handlers for one signal from the queue
+        Run all handlers for pending signals from the queue
         :return:
         """
 
