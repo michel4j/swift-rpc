@@ -526,7 +526,11 @@ class Server(object):
                     # record worker methods
                     _suffix = 'All'
                     if response and response.type == ResponseType.HEARTBEAT:
-                        worker_methods[worker] = set(response.content)
+                        try:
+                            w_methods = set(response.content)
+                        except (ValueError, TypeError):
+                            w_methods = set()
+                        worker_methods[worker] = w_methods
                         _suffix = ','.join(worker_methods[worker]) if worker_methods[worker] else _suffix
 
                     if worker_is_new:
