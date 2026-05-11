@@ -5,7 +5,7 @@ import time
 import queue
 import socket
 
-from typing import Type, Literal
+from typing import Type, Literal, Sequence
 from threading import Thread
 from multiprocessing import Process
 from enum import Enum
@@ -150,16 +150,17 @@ class Response(object):
         )
 
     @staticmethod
-    def heartbeat(system_id: bytes = b''):
+    def heartbeat(system_id: bytes = b'', methods: Sequence[str] = ()):
         """
         Generate a heartbeat response packet
         :return: new Response object
         """
+        content = methods
         return Response(
             system_id,
             b'heartbeat',
             ResponseType.HEARTBEAT,
-            b''
+            content
         ).parts()
 
     def __str__(self):
@@ -271,10 +272,10 @@ class ServiceFactory(object):
         Get a list of allowed remote methods for the service type
         :return: list of method names
         """
-        return tuple(
+        return tuple({
             re.sub('^remote__', '', attr)
             for attr in dir(self.service_type) if attr.startswith('remote__')
-        )
+        } | {'client_config'})
 
     def new(self):
         """
@@ -289,16 +290,31 @@ class Worker(object):
     A worker which manages an instance of the Service. Each worker is able to perform the same tasks
     """
 
-    def __init__(self, backend: str, service: Service):
+    def __init__(self, backend: str, service: Service, methods: Sequence[str] = (), *args, **kwargs):
         """
         :param backend: Backend address to connect to
         :param service: A Service instance which provides the API for the server
+        :param methods: List of remote methods supported by this worker instance
         """
 
         self.service = service
         self.context = zmq.Context()
         self.backend = backend
         self.replies = queue.Queue()
+        self.methods = methods
+
+    def is_supported(self, method: str) -> bool:
+        """
+        Check if a method is supported by this worker
+        :param method: method name
+        :return: bool
+        """
+        if not self.methods:
+            return True
+        elif method in {'ping', 'client_config'}:
+            return True
+        else:
+            return method in self.methods
 
     def run(self):
         """
@@ -307,7 +323,9 @@ class Worker(object):
         sock = self.context.socket(zmq.DEALER)
         sock.identity = self.service.create_worker_id()
         sock.connect(self.backend)
-        sock.send_multipart(Response.heartbeat())
+
+        # initial heartbeat message
+        sock.send_multipart(Response.heartbeat(methods=self.methods))
         last_message = time.time()
 
         poller = zmq.Poller()
@@ -326,6 +344,9 @@ class Worker(object):
                 try:
                     request = Request.create(*req_data, reply_to=self.replies)
                     logger.info(f'<- {request}')
+                    if not self.is_supported(request.method):
+                        logger.warning(f'Processing unsupported method `{request.method}`!')
+
                 except Exception as e:
                     logger.error(f'Invalid request: {e}')
                     logger.exception(e)
@@ -335,19 +356,19 @@ class Worker(object):
 
             # Send a heartbeat every so often when idle
             if time.time() - last_message > MIN_HEARTBEAT_INTERVAL:
-                sock.send_multipart(Response.heartbeat())
+                sock.send_multipart(Response.heartbeat(methods=self.methods))
                 last_message = time.time()
 
 
-def start_worker(address: str, factory: ServiceFactory):
+def start_worker(address: str, factory: ServiceFactory, methods: Sequence[str] = (), *args, **kwargs):
     """
     Start a single worker in a subprocess
     :param address: backend address
     :param factory: Service Factory
-
+    :param methods: List of remote methods supported by this worker instance
     """
     service = factory.new()
-    worker = Worker(address, service)
+    worker = Worker(address, service, methods=methods, *args, **kwargs)
     logger.debug(f'Starting new worker process: {os.getpid()}')
     return worker.run()
 
@@ -481,12 +502,14 @@ class Server(object):
     def round_robin_proxy(self):
         """
         A proxy which forwards all messages from the front-end to the back-end in round-robin fashion.
+        This proxy supports heterogeneous workers.
         """
         frontend, backend = self._setup_sockets()
         poller = zmq.Poller()
         poller.register(backend, zmq.POLLIN)
         backend_ready = False
-        workers = {}
+        worker_times = {}
+        worker_methods = {}
         worker_queue = []
 
         try:
@@ -496,41 +519,69 @@ class Server(object):
                 if backend in sockets:
                     reply = backend.recv_multipart()
                     worker = reply[0]
-                    worker_is_new = worker not in workers
-                    workers[worker] = time.time()
+                    worker_is_new = worker not in worker_times
+                    worker_times[worker] = time.time()
+                    response = self._process_response(worker, reply, frontend)
+
+                    # record worker methods
+                    _suffix = 'All'
+                    if response and response.type == ResponseType.HEARTBEAT:
+                        worker_methods[worker] = set(response.content)
+                        _suffix = ','.join(worker_methods[worker]) if worker_methods[worker] else _suffix
+
                     if worker_is_new:
                         worker_queue.append(worker)
-                        logger.info(f'Workers [{len(workers):4d}], + : {worker.decode("utf-8")}')
-                    self._process_response(worker, reply, frontend)
+                        logger.info(f'Workers [{len(worker_times):4d}], + : {worker.decode("utf-8")} | {_suffix}')
 
                 # check and expire workers who haven't chatted in while
                 expired = time.time() - MAX_HEARTBEAT_INTERVAL
-                removed = [w for w, t in workers.items() if t <= expired]
-                workers = {w: t for w, t in workers.items() if t > expired}
-                worker_queue = [w for w in worker_queue if w in workers]
+                removed = [w for w, t in worker_times.items() if t <= expired]
+                worker_times = {w: t for w, t in worker_times.items() if t > expired}
+                worker_queue = [w for w in worker_queue if w in worker_times]
+                worker_methods = {w: m for w, m in worker_methods.items() if w not in removed}
                 if removed:
                     removed_workers = ', '.join([w.decode('utf-8') for w in removed])
-                    logger.warning(f'Workers [{len(workers):4d}], - : {removed_workers}')
+                    logger.warning(f'Workers [{len(worker_times):4d}], - : {removed_workers}')
                     self._monitor_cleanup(removed)
 
-                if workers and not backend_ready:
+                if worker_times and not backend_ready:
                     # Poll for clients now that a worker is available and backend was not ready
                     poller.register(frontend, zmq.POLLIN)
                     backend_ready = True
-                elif backend_ready and not workers:
+                elif backend_ready and not worker_times:
                     poller.unregister(frontend)
                     backend_ready = False
 
                 if frontend in sockets:
-                    request = frontend.recv_multipart()
+                    raw_request = frontend.recv_multipart()
+                    request = Request.create(*raw_request)
 
-                    # cycle worker from front to back of queue
-                    worker = worker_queue.pop(0)
-                    worker_queue.append(worker)
+                    if request.method in ['client_config', 'ping']:
+                        content = '' if request.method == 'ping' else self.service_factory.get_methods()
+                        response = request.reply(content, ResponseType.DONE)
+                        frontend.send_multipart(response.parts())
+                        continue
 
-                    # send task to worker
-                    backend.send_multipart([worker] + request)
-                    self._monitor_request(worker, request)
+                    # find supported worker and send command
+                    for i in range(len(worker_queue)):
+                        worker = worker_queue[i]
+                        w_methods = worker_methods.get(worker, set())
+                        accepts_method = (not w_methods) or request.method in w_methods
+                        if accepts_method:
+                            # cycle worker from front to back of queue
+                            worker = worker_queue.pop(i)
+                            worker_queue.append(worker)
+
+                            # send task to worker
+                            backend.send_multipart([worker] + raw_request)
+                            self._monitor_request(worker, raw_request)
+                            break
+                    else:
+                        logger.warning(f'No available workers support method `{request.method}`!')
+                        worker = worker_queue.pop(0)
+                        worker_queue.append(worker)
+                        backend.send_multipart([worker] + raw_request)
+                        self._monitor_request(worker, raw_request)
 
         finally:
             frontend.close()
@@ -594,12 +645,19 @@ class Server(object):
 
                 if frontend in sockets:
                     # Get next client request, route to last-used worker, the oldest item in workers dictionary
-                    request = frontend.recv_multipart()
+                    raw_request = frontend.recv_multipart()
+                    request = Request.create(*raw_request)
+
+                    if request.method in ['client_config', 'ping']:
+                        content = '' if request.method == 'ping' else self.service_factory.get_methods()
+                        response = request.reply(content, ResponseType.DONE)
+                        frontend.send_multipart(response.parts())
+                        continue
 
                     worker = next(iter(workers))
                     workers.pop(worker)     # remove worker from list as it is now busy
-                    backend.send_multipart([worker] + request)
-                    self._monitor_request(worker, request)
+                    backend.send_multipart([worker] + raw_request)
+                    self._monitor_request(worker, raw_request)
 
                     # Don't poll clients if no workers are available and set backend_ready flag to false
                     if not workers:
@@ -611,15 +669,17 @@ class Server(object):
 
 
 class WorkerManager(object):
-    def __init__(self, factory: ServiceFactory, address: str, instances: int = 1):
+    def __init__(self, factory: ServiceFactory, address: str, instances: int = 1, methods: Sequence[str] = ()):
         """
         :param factory:  A ServiceFactory instance
         :param address: Backend address to connect to
         :param instances: Number of worker instances to manage
+        :param methods: List of allowed methods to run
         """
         self.factory = factory
         self.backend_addr = address.replace('*', 'localhost')
         self.instances = instances
+        self.methods = methods
         self.processes = []
 
     def start_workers(self):
@@ -630,11 +690,13 @@ class WorkerManager(object):
 
         self.processes = []
         for i in range(self.instances):
-            p = Process(target=start_worker, args=(self.backend_addr, self.factory))
+            p = Process(target=start_worker, args=(self.backend_addr, self.factory, self.methods))
             p.start()
             self.processes.append(p)
         if self.instances:
             logger.info(f'Connected {self.instances} worker(s) to {self.backend_addr}')
+            _method_txt = ','.join(self.methods) if self.methods else 'All'
+            logger.info(f'Supported methods: {_method_txt}')
 
     def wait_for_workers(self):
         """

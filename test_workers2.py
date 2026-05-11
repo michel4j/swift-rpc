@@ -14,8 +14,8 @@ if __name__ == '__main__':
         address="tcp://localhost:9991",
         instances=1,
         methods=(
-            'hello_world',
-            'date',
+            'progress',
+            'error'
         )
     )
     manager.run()
