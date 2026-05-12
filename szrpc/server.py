@@ -106,7 +106,7 @@ class Request(object):
 
     def __str__(self):
         req_id = '/'.join(self.request_id.decode('ascii').split('/')[-2:])
-        call_signature = log.log_call(self.method, (), self.kwargs)
+        call_signature = log.log_call(self.method, (), self.kwargs, simple=True)
         return f"req[{req_id}] - {call_signature}"
 
 

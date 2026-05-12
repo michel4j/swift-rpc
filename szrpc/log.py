@@ -1,6 +1,7 @@
 """This module implements utility classes and functions for logging."""
 import logging
 from logging.handlers import RotatingFileHandler
+from typing import Any
 
 IMPORTANT = 25
 logging.addLevelName(IMPORTANT, 'IMPORTANT')
@@ -110,17 +111,28 @@ def log_to_file(filename, level=logging.DEBUG):
     logging.getLogger('').addHandler(logfile)
 
 
-def log_call(method, args, kwargs):
+def type_name(var: Any) -> str:
+    """
+    Get a type name from a variable.
+    :param var: any object
+    :return: string type
+    """
+    return type(var).__name__
+
+
+def log_call(method, args, kwargs, simple: bool = False):
     """
     Generate a function call string for logging
     :param method: method name
     :param args: positional arguments
     :param kwargs: keyword arguments
+    :param simple: if true, do not show detailed signature
     :return: string for example "log_call('check', 1, 2, 3, a=1, b=2, c=3)"
     """
 
+    repr_func = repr if not simple else type_name
     arg_strs = []
-    arg_strs.extend([repr(arg) for arg in args])
-    arg_strs.extend([f'{k}={repr(v)}' for k, v in kwargs.items()])
+    arg_strs.extend([repr_func(arg) for arg in args])
+    arg_strs.extend([f'{k}={repr_func(v)}' for k, v in kwargs.items()])
 
     return f'{method}({", ".join(arg_strs)})'
