@@ -133,6 +133,6 @@ def log_call(method, args, kwargs, simple: bool = False):
     repr_func = repr if not simple else type_name
     arg_strs = []
     arg_strs.extend([repr_func(arg) for arg in args])
-    arg_strs.extend([f'{k}={repr_func(v)}' for k, v in kwargs.items()])
+    arg_strs.extend([f'{k}={repr_func(v)}' for i, (k, v) in enumerate(kwargs.items()) if i < 5])
 
     return f'{method}({", ".join(arg_strs)})'
