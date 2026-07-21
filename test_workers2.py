@@ -12,10 +12,10 @@ if __name__ == '__main__':
     manager = WorkerManager(
         factory,
         address="tcp://localhost:9991",
-        instances=1,
+        instances=4,
         methods=(
             'progress',
-            'error'
+            'date'
         )
     )
     manager.run()

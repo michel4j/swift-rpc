@@ -46,15 +46,22 @@ class App(QApplication):
             time.sleep(1)
 
         names = ['Joe', 'Jim', 'Janay', 'John']
-        for i in range(15):
+        i = 0
+        while True:
             if i % 2 == 0:
                 self.monitor(self.client.hello_world(name=random.choice(names)))
-            if i % 3 == 0:
+            elif i % 3 == 0:
                 self.monitor(self.client.progress(label=f'proc{i}'))
-            if i % 4 == 0:
-                self.monitor(self.client.error())
-            self.monitor(self.client.date())
+            else:
+                self.monitor(self.client.date())
+            i += 1
             time.sleep(0.5)
+
+            # Remove completed results
+            self.results = [res for res in self.results if not res.is_ready()]
+
+            if i > 1_000_000:
+                break
 
         while self.results:
             self.results = [res for res in self.results if not res.is_ready()]

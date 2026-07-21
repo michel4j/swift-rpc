@@ -44,7 +44,7 @@ class Client(object):
 
     RESULT_CLASS = Result
 
-    def __init__(self, address, methods=(), heartbeat: int = 0, client_id: str = None):
+    def __init__(self, address, methods=(), heartbeat: int = 0, client_id: str | None = None, linger: bool = True):
         """
         :param address: Server address for the client, eg. tcp://localhost:9990
         :param methods: sequence of method names to allow for this client
@@ -52,6 +52,7 @@ class Client(object):
         detect server disconnections.
         :param client_id: client identifier slug. If not provided a new one will be generated. Must be unique between
         simultaneously connected clients. use the Client.create_id() class method to generate compatible unique ids.
+        :param linger: if True, keep unsent messages in the queue on exit
         """
         self.client_id = self.create_id()
         self.context = zmq.Context()
@@ -61,6 +62,7 @@ class Client(object):
         self.remote_methods = set(methods)
         self.results = {}
         self.ready = False
+        self.linger = linger
         self.starting = True
         self.last_available = time.time()
         self.last_ping = time.time()
@@ -158,39 +160,45 @@ class Client(object):
         self.last_available = time.time()
         self.last_ping = time.time()
 
-        while True:
-            ping_pending = self.heartbeat > 0 and (time.time() - self.heartbeat > self.last_ping)
-            if socket.poll(10, zmq.POLLIN):
-                reply_data = socket.recv_multipart()
-                self.last_available = time.time()
-                self.last_ping = time.time()
-                try:
-                    response = Response.create(self.client_id, *reply_data)
-                except Exception as e:
-                    logger.error('Invalid response!')
-                    logger.exception(e)
-                else:
-                    logger.debug(f'<- {response}')
-                    res = self.results.get(response.request_id, None)
-                    if res is not None:
-                        if response.type == ResponseType.UPDATE:
-                            res.update(response.content)
-                        elif response.type == ResponseType.DONE:
-                            res.done(response.content)
-                        elif response.type == ResponseType.ERROR:
-                            res.failure(response.content)
-            elif self.is_ready() and ping_pending:
-                # send ping if no activity within heartbeat interval
-                try:
-                    self.ping()
-                except AttributeError:
-                    self.client_config()    # ping is not available, use client_config
-                self.last_ping = time.time()
+        if self.linger:
+            socket.setsockopt(zmq.LINGER, 0)
+        try:
+            while True:
+                ping_pending = self.heartbeat > 0 and (time.time() - self.heartbeat > self.last_ping)
+                if socket.poll(10, zmq.POLLIN):
+                    reply_data = socket.recv_multipart()
+                    self.last_available = time.time()
+                    self.last_ping = time.time()
+                    try:
+                        response = Response.create(self.client_id, *reply_data)
+                    except Exception as e:
+                        logger.error('Invalid response!')
+                        logger.exception(e)
+                    else:
+                        logger.debug(f'<- {response}')
+                        res = self.results.get(response.request_id, None)
+                        if res is not None:
+                            if response.type == ResponseType.UPDATE:
+                                res.update(response.content)
+                            elif response.type == ResponseType.DONE:
+                                res.done(response.content)
+                            elif response.type == ResponseType.ERROR:
+                                res.failure(response.content)
+                elif self.is_ready() and ping_pending:
+                    # send ping if no activity within heartbeat interval
+                    try:
+                        self.ping()
+                    except AttributeError:
+                        self.client_config()    # ping is not available, use client_config
+                    self.last_ping = time.time()
 
-            if (self.is_ready() or self.starting) and not self.requests.empty():
-                request = self.requests.get()
-                socket.send_multipart(request.parts())
-                self.starting = False
+                if (self.is_ready() or self.starting) and not self.requests.empty():
+                    request = self.requests.get()
+                    socket.send_multipart(request.parts())
+                    self.starting = False
+        finally:
+            socket.close()
+            self.context.term()
 
     def emit_results(self):
         """

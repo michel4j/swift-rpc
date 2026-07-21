@@ -38,7 +38,7 @@ class MyService(Service):
         with self.lock:
             for i in range(10):
                 request.reply(f'{label} {i*10}% complete')
-                time.sleep(1)
+                time.sleep(0.1)
         return f"Progress done"
 
 

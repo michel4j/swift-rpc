@@ -134,8 +134,8 @@ class ResultMixin(object):
     def __str__(self):
         token = self.identity[:4]
         ready_text = {
-            (True, False): 'Ready',
-            (False, False): 'Not Ready',
+            (True, False): 'Complete',
+            (False, False): 'In progress',
             (False, True): 'Failed',
             (True, True): 'Failed',
         }[(self.ready, self.failed)]

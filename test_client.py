@@ -31,15 +31,26 @@ if __name__ == '__main__':
 
     results = []
     names = ['Joe', 'Jim', 'Janay', 'John']
-    for i in range(15):
-        if i % 2 == 0:
-            monitor(client.hello_world(name=random.choice(names)), results)
-        if i % 3 == 0:
-            monitor(client.progress(label=f'proc{i}'), results)
-        if i % 4 == 0:
-            monitor(client.error(), results)
-        monitor(client.date(), results)
-        time.sleep(0.5)
+    i = 0
+    try:
+        while True:
+            if i % 2 == 0:
+                monitor(client.hello_world(name=random.choice(names)), results)
+            if i % 3 == 0:
+                monitor(client.progress(label=f'proc{i}'), results)
+            else:
+                monitor(client.date(), results)
+            i += 1
+            time.sleep(0.5)
+
+            # Remove completed results
+            results = [res for res in results if not res.is_ready()]
+
+            if i > 1_000_000:
+                break
+
+    except KeyboardInterrupt:
+        print(f'Terminated after {i} requests')
 
     while results:
         results = [res for res in results if not res.is_ready()]
