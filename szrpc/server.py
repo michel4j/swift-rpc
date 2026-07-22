@@ -12,7 +12,7 @@ from enum import Enum
 
 import msgpack
 import zmq
-from . import log, namer
+from . import log, namer, __version__
 
 try:
     from . import monitor as mon
@@ -396,7 +396,8 @@ class Server(object):
 
         if DASH_ENABLED and monitor_port:
             info = {
-                'host': socket.getfqdn(),
+                'host': socket.getfqdn().split('.')[0].upper(),
+                'version': f"v{__version__}",
                 'frontend': self.frontend_addr,
                 'backend': self.backend_addr,
                 'description': self.service_factory.get_description(),

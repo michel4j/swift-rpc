@@ -20,5 +20,5 @@ class GResult(ResultMixin, GObject.GObject):
         else:
             GLib.idle_add(self.emit, signal, *args)
 
-    def process(self):
+    def post_process(self):
         pass

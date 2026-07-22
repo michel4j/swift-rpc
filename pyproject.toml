@@ -35,7 +35,7 @@ include = [
 version = "0.0.0"
 
 [tool.poetry.dependencies]
-python = ">=3.9,<4.0"
+python = ">=3.9,<3.15"
 pyzmq = ">=27.1.0"
 msgpack = ">=1.1.0"
 
@@ -43,13 +43,15 @@ msgpack = ">=1.1.0"
 fastapi = { version = ">=0.127.0,<0.140.0", optional = true }
 uvicorn = { version = ">=0.39.0,<0.51.0", optional = true }
 pygobject = { version = ">=3.54.5,<4.0.0", optional = true }
-pyqt5 = { version = ">=5.15.11,<6.0.0", optional = true }
+pyside6 = { version = ">=6.10.3,<7.0.0", optional = true }
 
 
 [tool.poetry.extras]
 dash = ["fastapi", "uvicorn"]
-dev = ["pygobject", "pyqt5"]
-all = ["fastapi", "uvicorn", "pygobject", "pyqt5"]
+dev = ["pygobject", "pyside6"]
+qt = ["pyside6"]
+gtk = ["pygobject"]
+all = ["fastapi", "uvicorn", "pygobject", "pyside6"]
 
 [tool.poetry.requires-plugins]
 poetry-dynamic-versioning = { version = ">=1.0.0,<2.0.0", extras = ["plugin"] }

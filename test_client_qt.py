@@ -4,7 +4,8 @@ import sys
 import random
 from threading import Thread
 
-from PyQt5.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import Slot
 
 from szrpc import log
 from szrpc.client import Client
@@ -21,16 +22,16 @@ class App(QApplication):
         self.client = Client('tcp://localhost:9990', heartbeat=1)
         super().__init__(sys.argv)
 
-    @staticmethod
-    def on_done(res, data):
+    @Slot(object, object)
+    def on_done(self, res, data):
         logger.info(f"DONE: {res}, {data!r}")
 
-    @staticmethod
-    def on_err(res, data):
+    @Slot(object, object)
+    def on_err(self, res, data):
         logger.info(f"ERROR: {res}, {data!r}")
 
-    @staticmethod
-    def on_update(res, data):
+    @Slot(object, object)
+    def on_update(self, res, data):
         logger.info(f"UPDATE: {res}, {data!r}")
 
     def monitor(self, res):

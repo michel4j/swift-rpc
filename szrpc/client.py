@@ -6,15 +6,41 @@ import time
 import uuid
 import importlib
 from queue import Queue
-from threading import Thread
+from threading import Thread, Lock
 
 import zmq
 
 from . import log
 from .result import Result
-from .server import ResponseType, Request, Response
+from .server import Request, Response
 
 logger = log.get_module_logger('szrpc')
+
+
+class ResultManager:
+    def __init__(self):
+        self.data = {}
+        self.lock = Lock()
+
+    def add(self, result: Result):
+        with self.lock:
+            self.data[result.result_id] = result
+
+    def get(self, result_id: bytes) -> Result | None:
+        with self.lock:
+            return self.data.get(result_id)
+
+    def remove(self, result_id: bytes):
+        with self.lock:
+            del self.data[result_id]
+
+    def process(self, response):
+        result = self.get(response.request_id)
+        if result is not None:
+            result.process(response)
+
+            if result.is_ready():
+                self.remove(response.request_id)
 
 
 def load_class(dotted_path: str) -> type:
@@ -46,7 +72,7 @@ class Client(object):
 
     def __init__(self, address, methods=(), heartbeat: int = 0, client_id: str | None = None, linger: bool = True):
         """
-        :param address: Server address for the client, eg. tcp://localhost:9990
+        :param address: Server address for the client, For example: tcp://localhost:9990
         :param methods: sequence of method names to allow for this client
         :param heartbeat: heartbeat interval in seconds, if 0, no heartbeat is used (default). Allows the client to
         detect server disconnections.
@@ -54,13 +80,14 @@ class Client(object):
         simultaneously connected clients. use the Client.create_id() class method to generate compatible unique ids.
         :param linger: if True, keep unsent messages in the queue on exit
         """
-        self.client_id = self.create_id()
+        self.client_id = client_id.encode('utf-8') if client_id else self.create_id()
         self.context = zmq.Context()
         self.url = address
         self.heartbeat = heartbeat
         self.requests = Queue()
+        self.responses = Queue()
         self.remote_methods = set(methods)
-        self.results = {}
+        self.results = ResultManager()
         self.ready = False
         self.linger = linger
         self.starting = True
@@ -113,6 +140,7 @@ class Client(object):
         if introspect:
             res = self.call_remote('client_config')
             res.connect('done', self.setup)
+            res.wait()
         else:
             self.ready = True
             logger.debug(f'~> {self.url}... Ready!')
@@ -143,47 +171,37 @@ class Client(object):
         request_id = self.create_request_id()
         kwargs = {} if kwargs is None else kwargs
         request = Request(self.client_id, request_id, method, kwargs)
+        logger.debug(f'~> {request}')
         self.requests.put(request)
-        self.results[request_id] = self.RESULT_CLASS(request_id)
-        logger.debug(f'-> {request}')
-        return self.results[request_id]
+        result = self.RESULT_CLASS(request_id)
+        self.results.add(result)
+        return result
 
     def send_requests(self):
         """
-        Monitors the request queue and sends pending requests to the server
+        Monitors the request queue and sends pending requests to the server. Also
+        receives responses from the server and adds them to the response queue
 
         """
-        socket = self.context.socket(zmq.DEALER)
-        socket.identity = self.client_id
-        socket.connect(self.url)
+        sock = self.context.socket(zmq.DEALER)
+        sock.identity = self.client_id
+        sock.connect(self.url)
 
         self.last_available = time.time()
         self.last_ping = time.time()
 
-        if self.linger:
-            socket.setsockopt(zmq.LINGER, 0)
+        if not self.linger:
+            sock.setsockopt(zmq.LINGER, 0)
         try:
             while True:
-                ping_pending = self.heartbeat > 0 and (time.time() - self.heartbeat > self.last_ping)
-                if socket.poll(10, zmq.POLLIN):
-                    reply_data = socket.recv_multipart()
+                ping_pending = 0 < self.heartbeat < time.time() - self.last_ping
+
+                if sock.poll(10, zmq.POLLIN):
+                    # receive replies
+                    reply_data = sock.recv_multipart()
                     self.last_available = time.time()
                     self.last_ping = time.time()
-                    try:
-                        response = Response.create(self.client_id, *reply_data)
-                    except Exception as e:
-                        logger.error('Invalid response!')
-                        logger.exception(e)
-                    else:
-                        logger.debug(f'<- {response}')
-                        res = self.results.get(response.request_id, None)
-                        if res is not None:
-                            if response.type == ResponseType.UPDATE:
-                                res.update(response.content)
-                            elif response.type == ResponseType.DONE:
-                                res.done(response.content)
-                            elif response.type == ResponseType.ERROR:
-                                res.failure(response.content)
+                    self.responses.put(reply_data)
                 elif self.is_ready() and ping_pending:
                     # send ping if no activity within heartbeat interval
                     try:
@@ -194,30 +212,27 @@ class Client(object):
 
                 if (self.is_ready() or self.starting) and not self.requests.empty():
                     request = self.requests.get()
-                    socket.send_multipart(request.parts())
+                    sock.send_multipart(request.parts())
                     self.starting = False
         finally:
-            socket.close()
+            sock.close()
             self.context.term()
 
     def emit_results(self):
         """
-        Triggers pending result signals and cleans-up the results dictionary. Also monitors for connection issues
+        Triggers pending result signals and cleans up the results dictionary. Also monitors for connection issues
         """
         while True:
-            expired = set()
-            # process result signals
-            for req_id in list(self.results.keys()):
-                res = self.results[req_id]
-                res.process()
-                if res.is_ready():
-                    expired.add(req_id)
-                time.sleep(0.01)
-
-            # remove expired items
-            for req_id in expired:
-                del self.results[req_id]
-                time.sleep(0.01)
+            if not self.responses.empty():
+                response_data = self.responses.get()
+                try:
+                    response = Response.create(self.client_id, *response_data)
+                except Exception as e:
+                    logger.error('Invalid response!')
+                    logger.exception(e)
+                else:
+                    logger.debug(f'<~ {response}')
+                    self.results.process(response)
 
             # check connection
             if self.heartbeat > 0:
@@ -245,4 +260,3 @@ def use(result_class: type | str):
     """
 
     Client.use(result_class)
-

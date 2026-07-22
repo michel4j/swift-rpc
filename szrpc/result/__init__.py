@@ -1,8 +1,25 @@
-import hashlib
 import time
 from queue import Queue
 from collections import defaultdict
-from typing import Any
+from typing import Any, Protocol
+
+from szrpc.server import ResponseType
+
+
+class ResultProtocol(Protocol):
+    identity: str
+    result_id: bytes
+    parts: list
+    results: Any
+    ready_state: bool
+    failed_state: bool
+    errors: str
+
+    def trigger(self, signal: str, *args, **kwargs):
+        ...
+
+    def post_process(self):
+        ...
 
 
 class SignalObject(object):
@@ -12,7 +29,7 @@ class SignalObject(object):
         self.signals = Queue()
         self.slots = defaultdict(list)
 
-    def process(self):
+    def post_process(self):
         """
         Run all handlers for pending signals from the queue
         :return:
@@ -52,7 +69,7 @@ class SignalObject(object):
 
         :param signal: signal name
         :param slot:  handler. It can be the same signal handler used to connect, or it could be  the integer returned
-        when the hander was connected.
+        when the handler was connected.
         """
 
         if isinstance(slot, int) and 0 < slot < len(self.slots[signal]):
@@ -61,66 +78,46 @@ class SignalObject(object):
             self.slots[signal].remove((slot, args, kwargs))
 
 
-class ResultMixin(object):
-    identity: str
-    result_id: bytes
-    parts: list
-    results: Any
-    ready: bool
-    failed: bool
-    errors: str
+class ResultMixin:
 
-    def setup(self, result_id: bytes):
+    def setup(self: ResultProtocol, result_id: bytes):
         self.identity = result_id.decode('utf-8')
         self.result_id = result_id
         self.parts = []
         self.results = None
         self.errors = ''
-        self.ready = False
-        self.failed = False
-        super().__init__()
+        self.ready_state = False
+        self.failed_state = False
 
-    def update(self, info):
-        """
-        Update the results and notify that partial results are available.
+    def process(self: ResultProtocol, response):
+        if response.type == ResponseType.UPDATE:
+            info = response.content
+            self.parts.append(info)
+            self.trigger('update', info)
 
-        :param info: partial results
-        """
-        self.parts.append(info)
-        self.trigger('update', info)
+        elif response.type == ResponseType.DONE:
+            info = response.content
+            self.results = info if info is not None else self.parts
+            self.ready_state = True
+            self.trigger('done', info)
+        elif response.type == ResponseType.ERROR:
+            self.errors = response.content
+            self.failed_state = True
+            self.ready_state = True
+            self.trigger('failed', self.errors)
 
-    def failure(self, error: str):
-        """
-        Update the results and notify that results are available.
-
-        :param error: error message
-        """
-        self.errors = error
-        self.failed = True
-        self.ready = True
-        self.trigger('failed', error)
-
-    def done(self, info=None):
-        """
-        Emits the done signal
-
-        :param info: results or None
-        """
-        self.results = info if info is not None else self.parts
-        self.ready = True
-        self.trigger('done', info)
+        self.post_process()
 
     def is_ready(self) -> bool:
         """
         Check if the result is ready
         """
-        return self.ready or self.failed
+        return self.ready_state or self.failed_state
 
     def wait(self, timeout: int = 0):
         """
         Wait for result to be ready
 
-        returns
         :param timeout: int, maximum time to wait, 0 means wait forever.
         :return: True if result is ready or False if it timed-out.
         """
@@ -134,11 +131,11 @@ class ResultMixin(object):
     def __str__(self):
         token = self.identity[:4]
         ready_text = {
-            (True, False): 'Complete',
-            (False, False): 'In progress',
-            (False, True): 'Failed',
-            (True, True): 'Failed',
-        }[(self.ready, self.failed)]
+            (True, False): 'DONE',
+            (False, False): 'UPDATE',
+            (False, True): 'FAILED',
+            (True, True): 'FAILED',
+        }[(self.ready_state, self.failed_state)]
         return f'rep[{token}..] - {ready_text}'
 
 
@@ -146,7 +143,7 @@ class Result(ResultMixin, SignalObject):
     """
     Result object providing methods for managing results
     """
-    __slots__ = ('identity', 'parts', 'results', 'ready', 'failed', 'errors')
+    __slots__ = ('identity', 'parts', 'results', 'ready_state', 'failed_state', 'errors')
 
     def __init__(self, result_id: bytes):
         self.setup(result_id)
