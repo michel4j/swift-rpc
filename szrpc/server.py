@@ -192,6 +192,14 @@ class Service(object):
         )
         self.name_generator = namer.RandomGenerator()
 
+    @classmethod
+    def __str__(cls):
+        if not cls.__doc__:
+            return cls.__name__
+
+        description = ' '.join(cls.__doc__.split())
+        return f'{cls.__name__} - {description}'
+
     def create_worker_id(self) -> bytes:
         """
         Generate a unique worker id for the current host
@@ -261,11 +269,7 @@ class ServiceFactory(object):
         Get a description of the service type from the class name and the docstring
         :return: description string
         """
-        if not self.service_type.__doc__:
-            return self.service_type.__name__
-
-        description = ' '.join(self.service_type.__doc__.split())
-        return f'{self.service_type.__name__} - {description}'
+        return self.service_type.__str__()
 
     def get_methods(self) -> tuple:
         """
