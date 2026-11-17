@@ -7,6 +7,7 @@ import uuid
 import importlib
 from queue import Empty, Queue
 from threading import Event, Lock, Thread, current_thread
+from typing import Any, Callable
 
 from . import log
 from .protocol import Request
@@ -38,6 +39,7 @@ class Client(object):
         linger: bool = True,
         transport: ClientTransport | None = None,
         dispatcher: Dispatcher | None = None,
+        sub_address: str | None = None,
     ):
         """
         :param address: Server address for the client, For example: tcp://localhost:9990
@@ -49,18 +51,28 @@ class Client(object):
         :param linger: if True, keep unsent messages in the queue on exit
         :param transport: Optional ClientTransport adapter; defaults to ZmqClientTransport
         :param dispatcher: Optional Dispatcher adapter for Result signal callbacks
+        :param sub_address: Optional ZMQ PUB address to subscribe for broadcast events
         """
         if transport is not None:
             self.client_id = transport.client_id
             self.transport = transport
         else:
             self.client_id = client_id.encode('utf-8') if client_id else self.create_id()
-            self.transport = ZmqClientTransport(address, self.client_id, linger=linger)
+            self.transport = ZmqClientTransport(
+                address,
+                self.client_id,
+                linger=linger,
+                sub_addr=sub_address,
+            )
 
         self.url = address
         self.heartbeat = heartbeat
         self.requests = Queue()
         self.responses = Queue()
+        self.events: Queue[tuple[str, Any]] = Queue()
+        self._subscriptions: dict[int, tuple[str, Callable[[str, Any], None]]] = {}
+        self._sub_lock = Lock()
+        self._next_sub_token = 1
         self.remote_methods = set(methods)
         self.dispatcher: Dispatcher = dispatcher or self.DEFAULT_DISPATCHER or DirectDispatcher()
         self._results: dict[bytes, Result] = {}
@@ -201,6 +213,36 @@ class Client(object):
         )
         self.requests.put(cancel_req)
 
+    def subscribe(self, topic: str, callback: Callable[[str, Any], None]) -> int:
+        """Subscribe to broadcast events matching `topic` prefix; returns a subscription token."""
+        with self._sub_lock:
+            token = self._next_sub_token
+            self._next_sub_token += 1
+            self._subscriptions[token] = (topic, callback)
+        if hasattr(self.transport, 'subscribe_topic'):
+            self.transport.subscribe_topic(topic)
+        return token
+
+    def unsubscribe(self, token_or_topic: int | str) -> None:
+        """Unsubscribe by integer token or topic prefix."""
+        removed_topics: list[str] = []
+        with self._sub_lock:
+            if isinstance(token_or_topic, int):
+                entry = self._subscriptions.pop(token_or_topic, None)
+                if entry is not None:
+                    removed_topics.append(entry[0])
+            else:
+                for tok, (topic, _) in list(self._subscriptions.items()):
+                    if topic == token_or_topic:
+                        self._subscriptions.pop(tok)
+                        removed_topics.append(topic)
+            remaining = {t for t, _ in self._subscriptions.values()}
+
+        if hasattr(self.transport, 'unsubscribe_topic'):
+            for topic in removed_topics:
+                if topic not in remaining:
+                    self.transport.unsubscribe_topic(topic)
+
     def send_requests(self):
         """
         Monitors the request queue and sends pending requests to the server. Also
@@ -229,6 +271,11 @@ class Client(object):
                     request = self.requests.get()
                     self.transport.send(request)
                     self.starting = False
+
+                if hasattr(self.transport, 'recv_event'):
+                    event = self.transport.recv_event(0)
+                    if event is not None:
+                        self.events.put(event)
         finally:
             self.transport.close()
 
@@ -251,6 +298,19 @@ class Client(object):
                     if result.is_ready():
                         with self._results_lock:
                             self._results.pop(response.request_id, None)
+
+            while not self.events.empty():
+                topic, payload = self.events.get()
+                with self._sub_lock:
+                    callbacks = [
+                        cb for prefix, cb in self._subscriptions.values() if topic.startswith(prefix)
+                    ]
+                if callbacks:
+                    def _dispatch_event(cbs=callbacks, t=topic, p=payload) -> None:
+                        for cb in cbs:
+                            cb(t, p)
+
+                    self.dispatcher.dispatch(_dispatch_event)
 
             # check connection
             if self.heartbeat > 0:

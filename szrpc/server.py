@@ -62,6 +62,13 @@ class Service(object):
     def __init__(self, *args, **kwargs):
         self.allowed_methods = self.get_methods()
         self.name_generator = namer.RandomGenerator()
+        self._publisher: Callable[[str, Any], None] | None = None
+
+    def publish(self, topic: str, payload: Any = None) -> None:
+        """Broadcast an unsolicited event to subscribed clients."""
+        if self._publisher is None:
+            raise RuntimeError('Service is not bound to a PUB-capable Worker transport')
+        self._publisher(topic, payload)
 
     @classmethod
     def get_description(cls) -> str:
@@ -198,6 +205,7 @@ class Worker(object):
         methods: Sequence[str] = (),
         *args,
         transport: WorkerTransport | None = None,
+        pub_addr: str | None = None,
         **kwargs,
     ):
         """
@@ -205,10 +213,12 @@ class Worker(object):
         :param service: A Service instance which provides the API for the server
         :param methods: List of remote methods supported by this worker instance
         :param transport: Optional WorkerTransport adapter; defaults to ZmqWorkerTransport
+        :param pub_addr: Optional ZMQ PUB address (broker XSUB) for broadcast events
         """
 
         self.service = service
         self.backend = backend
+        self.pub_addr = pub_addr
         self.replies = queue.Queue()
         self.methods = methods
         self.transport = transport
@@ -245,7 +255,13 @@ class Worker(object):
         """
         Main loop of the worker
         """
-        transport = self.transport or ZmqWorkerTransport(self.backend, self.service.create_worker_id())
+        transport = self.transport or ZmqWorkerTransport(
+            self.backend,
+            self.service.create_worker_id(),
+            pub_addr=self.pub_addr,
+        )
+        if hasattr(transport, 'publish'):
+            self.service._publisher = transport.publish
         active_requests: dict[str, Request] = {}
         active_lock = Lock()
 
@@ -300,16 +316,17 @@ class Worker(object):
             transport.close()
 
 
-def start_worker(address: str, factory, methods: Sequence[str] = (), *args, **kwargs):
+def start_worker(address: str, factory, methods: Sequence[str] = (), pub_addr: str | None = None, *args, **kwargs):
     """
     Start a single worker in a subprocess
     :param address: backend address
     :param factory: Service class, Service.factory(), or ServiceFactory
     :param methods: List of remote methods supported by this worker instance
+    :param pub_addr: Optional ZMQ PUB address (broker XSUB)
     """
     _, make_service = _resolve_service(factory)
     service = make_service()
-    worker = Worker(address, service, methods=methods, *args, **kwargs)
+    worker = Worker(address, service, methods=methods, pub_addr=pub_addr, *args, **kwargs)
     logger.debug(f'Starting new worker process: {os.getpid()}')
     return worker.run()
 
@@ -351,6 +368,7 @@ class Server(object):
         threaded: bool = False,
         worker_transport_factory: Callable[[], WorkerTransport] | None = None,
         client_timeout: float | None = None,
+        pub_port: int | None = None,
     ):
         """
         :param service_factory: A Service class, Service.factory(), or ServiceFactory
@@ -362,11 +380,14 @@ class Server(object):
         :param threaded: If True, run workers in-process in daemon threads instead of multiprocessing.Process
         :param worker_transport_factory: Optional factory for WorkerTransport when threaded=True
         :param client_timeout: Optional seconds of inactivity before cancelling a client's active requests
+        :param pub_port: Optional port for XPUB broadcast events (binds XSUB on pub_port + 1)
         """
         self.service_type, _ = _resolve_service(service_factory)
         self.service_factory = service_factory
         self.frontend_addr = f'tcp://*:{ports[0]}'
         self.backend_addr = f'tcp://*:{ports[1]}'
+        self.pub_addr = f'tcp://*:{pub_port}' if pub_port is not None else None
+        self.xsub_addr = f'tcp://*:{pub_port + 1}' if pub_port is not None else None
         self.transport = transport
         self._stop_event = Event()
         self._broker_thread: Thread | None = None
@@ -377,6 +398,7 @@ class Server(object):
             instances=instances,
             threaded=threaded,
             worker_transport_factory=worker_transport_factory,
+            pub_addr=self.xsub_addr,
         )
         self.monitor: MonitorPort = NullMonitor()
 
@@ -529,7 +551,12 @@ class Server(object):
 
     def _run_broker(self, strategy: Literal['round-robin', 'balancing']) -> None:
         """Unified broker loop supporting 'round-robin' and 'balancing' routing strategies."""
-        transport = self.transport or ZmqBrokerTransport(self.frontend_addr, self.backend_addr)
+        transport = self.transport or ZmqBrokerTransport(
+            self.frontend_addr,
+            self.backend_addr,
+            pub_addr=self.pub_addr,
+            xsub_addr=self.xsub_addr,
+        )
         if self.transport is None:
             logger.info(f'Listening for tasks from: {self.frontend_addr}')
             logger.info(f'Listening for workers at: {self.backend_addr}')
@@ -673,6 +700,7 @@ class WorkerManager(object):
         methods: Sequence[str] = (),
         threaded: bool = False,
         worker_transport_factory: Callable[[], WorkerTransport] | None = None,
+        pub_addr: str | None = None,
     ):
         """
         :param factory: Service class, Service.factory(), or ServiceFactory
@@ -681,9 +709,11 @@ class WorkerManager(object):
         :param methods: List of allowed methods to run
         :param threaded: Run workers in-process in threads instead of multiprocessing.Process
         :param worker_transport_factory: Optional factory for WorkerTransport when threaded=True
+        :param pub_addr: Optional ZMQ XSUB address for worker PUB sockets
         """
         self.factory = factory
         self.backend_addr = address.replace('*', 'localhost')
+        self.pub_addr = pub_addr.replace('*', 'localhost') if pub_addr else None
         self.instances = instances
         self.methods = methods
         self.threaded = threaded
@@ -707,13 +737,14 @@ class WorkerManager(object):
                     make_service(),
                     methods=self.methods,
                     transport=transport,
+                    pub_addr=self.pub_addr,
                 )
                 t = Thread(target=worker.run, daemon=True)
                 t.start()
                 self._workers.append(worker)
                 self._threads.append(t)
             else:
-                p = Process(target=start_worker, args=(self.backend_addr, self.factory, self.methods))
+                p = Process(target=start_worker, args=(self.backend_addr, self.factory, self.methods, self.pub_addr))
                 p.start()
                 self.processes.append(p)
         if self.instances:
