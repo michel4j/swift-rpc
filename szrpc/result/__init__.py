@@ -3,7 +3,7 @@ from queue import Queue
 from collections import defaultdict
 from typing import Any, Protocol
 
-from szrpc.server import ResponseType
+from szrpc.protocol import ResponseType
 
 
 class ResultProtocol(Protocol):

@@ -5,14 +5,13 @@ import socket
 import time
 import uuid
 import importlib
-from queue import Queue
-from threading import Thread, Lock
-
-import zmq
+from queue import Empty, Queue
+from threading import Event, Lock, Thread, current_thread
 
 from . import log
+from .protocol import Request
 from .result import Result
-from .server import Request, Response
+from .transport import ClientTransport, ZmqClientTransport
 
 logger = log.get_module_logger('szrpc')
 
@@ -70,7 +69,15 @@ class Client(object):
 
     RESULT_CLASS = Result
 
-    def __init__(self, address, methods=(), heartbeat: int = 0, client_id: str | None = None, linger: bool = True):
+    def __init__(
+        self,
+        address: str = '',
+        methods=(),
+        heartbeat: int = 0,
+        client_id: str | None = None,
+        linger: bool = True,
+        transport: ClientTransport | None = None,
+    ):
         """
         :param address: Server address for the client, For example: tcp://localhost:9990
         :param methods: sequence of method names to allow for this client
@@ -79,9 +86,15 @@ class Client(object):
         :param client_id: client identifier slug. If not provided a new one will be generated. Must be unique between
         simultaneously connected clients. use the Client.create_id() class method to generate compatible unique ids.
         :param linger: if True, keep unsent messages in the queue on exit
+        :param transport: Optional ClientTransport adapter; defaults to ZmqClientTransport
         """
-        self.client_id = client_id.encode('utf-8') if client_id else self.create_id()
-        self.context = zmq.Context()
+        if transport is not None:
+            self.client_id = transport.client_id
+            self.transport = transport
+        else:
+            self.client_id = client_id.encode('utf-8') if client_id else self.create_id()
+            self.transport = ZmqClientTransport(address, self.client_id, linger=linger)
+
         self.url = address
         self.heartbeat = heartbeat
         self.requests = Queue()
@@ -93,6 +106,8 @@ class Client(object):
         self.starting = True
         self.last_available = time.time()
         self.last_ping = time.time()
+        self._stop_event = Event()
+        self._threads: list[Thread] = []
         self.start(introspect=(not methods))
 
     @classmethod
@@ -135,8 +150,12 @@ class Client(object):
         :param introspect: whether to introspect the server for available methods
 
         """
-        Thread(target=self.send_requests, daemon=True).start()
-        Thread(target=self.emit_results, daemon=True).start()
+        self._threads = [
+            Thread(target=self.send_requests, daemon=True),
+            Thread(target=self.emit_results, daemon=True),
+        ]
+        for t in self._threads:
+            t.start()
         if introspect:
             res = self.call_remote('client_config')
             res.connect('done', self.setup)
@@ -144,6 +163,24 @@ class Client(object):
         else:
             self.ready = True
             logger.debug(f'~> {self.url}... Ready!')
+
+    def stop(self) -> None:
+        """Signal client background loops to stop and wait for them to exit."""
+        self._stop_event.set()
+        caller = current_thread()
+        for t in self._threads:
+            if t is not caller and t.is_alive():
+                t.join(timeout=1.0)
+
+    def close(self) -> None:
+        """Alias for stop()."""
+        self.stop()
+
+    def __enter__(self) -> 'Client':
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()
 
     def setup(self, result, methods):
         """
@@ -181,29 +218,20 @@ class Client(object):
         """
         Monitors the request queue and sends pending requests to the server. Also
         receives responses from the server and adds them to the response queue
-
         """
-        sock = self.context.socket(zmq.DEALER)
-        sock.identity = self.client_id
-        sock.connect(self.url)
-
         self.last_available = time.time()
         self.last_ping = time.time()
 
-        if not self.linger:
-            sock.setsockopt(zmq.LINGER, 0)
         try:
-            while True:
+            while not self._stop_event.is_set():
                 ping_pending = 0 < self.heartbeat < time.time() - self.last_ping
 
-                if sock.poll(10, zmq.POLLIN):
-                    # receive replies
-                    reply_data = sock.recv_multipart()
+                response = self.transport.recv(10)
+                if response is not None:
                     self.last_available = time.time()
                     self.last_ping = time.time()
-                    self.responses.put(reply_data)
+                    self.responses.put(response)
                 elif self.is_ready() and ping_pending:
-                    # send ping if no activity within heartbeat interval
                     try:
                         self.ping()
                     except AttributeError:
@@ -212,27 +240,24 @@ class Client(object):
 
                 if (self.is_ready() or self.starting) and not self.requests.empty():
                     request = self.requests.get()
-                    sock.send_multipart(request.parts())
+                    self.transport.send(request)
                     self.starting = False
         finally:
-            sock.close()
-            self.context.term()
+            self.transport.close()
 
     def emit_results(self):
         """
         Triggers pending result signals and cleans up the results dictionary. Also monitors for connection issues
         """
-        while True:
-            if not self.responses.empty():
-                response_data = self.responses.get()
-                try:
-                    response = Response.create(self.client_id, *response_data)
-                except Exception as e:
-                    logger.error('Invalid response!')
-                    logger.exception(e)
-                else:
-                    logger.debug(f'<~ {response}')
-                    self.results.process(response)
+        while not self._stop_event.is_set():
+            try:
+                response = self.responses.get(timeout=0.01)
+            except Empty:
+                response = None
+
+            if response is not None:
+                logger.debug(f'<~ {response}')
+                self.results.process(response)
 
             # check connection
             if self.heartbeat > 0:
@@ -243,7 +268,6 @@ class Client(object):
                 elif not self.ready and has_heartbeat and self.remote_methods:
                     self.ready = True
                     logger.info('Server connection restored!')
-            time.sleep(0.01)
 
     def __getattr__(self, name):
         if name in ['client_config', 'ping'] or name in self.remote_methods:

@@ -53,6 +53,12 @@ qt = ["pyside6"]
 gtk = ["pygobject"]
 all = ["fastapi", "uvicorn", "pygobject", "pyside6"]
 
+[tool.poetry.group.dev.dependencies]
+pytest = ">=6.0"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [tool.poetry.requires-plugins]
 poetry-dynamic-versioning = { version = ">=1.0.0,<2.0.0", extras = ["plugin"] }
 
