@@ -2,8 +2,8 @@
 name = "szrpc"
 dynamic = ["version"]
 description = " Simple ZeroMQ RPC in Python"
-readme = "README.rst"
-readme-content-type = "text/x-rst"
+readme = "README.md"
+readme-content-type = "text/markdown"
 license = "MIT"
 authors = [
     {name = "Michel Fodje",email = "michel.fodje@lightsource.ca"}
@@ -52,6 +52,12 @@ dev = ["pygobject", "pyside6"]
 qt = ["pyside6"]
 gtk = ["pygobject"]
 all = ["fastapi", "uvicorn", "pygobject", "pyside6"]
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=6.0"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [tool.poetry.requires-plugins]
 poetry-dynamic-versioning = { version = ">=1.0.0,<2.0.0", extras = ["plugin"] }

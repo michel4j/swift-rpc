@@ -1,24 +1,19 @@
-from . import ResultMixin
+from __future__ import annotations
 
-from gi.repository import GObject, GLib
+from typing import Callable
+
+from gi.repository import GLib
 
 
-class GResult(ResultMixin, GObject.GObject):
-    __gsignals__ = {
-        'update': (GObject.SIGNAL_RUN_FIRST, None, (object,)),
-        'done': (GObject.SIGNAL_RUN_FIRST, None, (object,)),
-        'failed': (GObject.SIGNAL_RUN_FIRST, None, (str,)),
-    }
+class GLibDispatcher:
+    """Dispatcher adapter that marshals Result callbacks onto the GLib main loop."""
 
-    def __init__(self, request_id: bytes):
-        super().__init__()
-        self.setup(request_id)
-
-    def trigger(self, signal, *args):
+    def dispatch(self, fn: Callable[[], None]) -> None:
         if GLib.main_context_get_thread_default():
-            self.emit(signal, *args)
+            fn()
         else:
-            GLib.idle_add(self.emit, signal, *args)
+            def _run() -> bool:
+                fn()
+                return False
 
-    def post_process(self):
-        pass
+            GLib.idle_add(_run)

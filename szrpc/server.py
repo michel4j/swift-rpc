@@ -1,18 +1,27 @@
+from __future__ import annotations
+
+import functools
 import re
 import os
 import sys
 import time
 import queue
 import socket
+from collections import defaultdict, deque
 
-from typing import Type, Literal, Sequence
-from threading import Thread
+from typing import Any, Callable, Protocol, Type, Literal, Sequence
+from threading import Event, Lock, Thread, current_thread
 from multiprocessing import Process
-from enum import Enum
 
-import msgpack
 import zmq
 from . import log, namer, __version__
+from .protocol import Request, Response, ResponseType
+from .transport import (
+    BrokerTransport,
+    WorkerTransport,
+    ZmqBrokerTransport,
+    ZmqWorkerTransport,
+)
 
 try:
     from . import monitor as mon
@@ -28,145 +37,10 @@ MIN_HEARTBEAT_INTERVAL = 1
 MAX_HEARTBEAT_INTERVAL = 2
 
 
-class ResponseType(Enum):
-    DONE = 1
-    UPDATE = 2
-    ERROR = 3
-    HEARTBEAT = 4
-    READY = 5
-
-
-class Request(object):
-    __slots__ = ('client_id', 'request_id', 'method', 'kwargs', 'reply_to', 'identity')
-
-    def __init__(self, client_id: bytes, request_id: bytes, method: str, kwargs: dict, reply_to: queue.Queue = None):
-        """
-        Request object
-
-        :param client_id: client identification
-        :param request_id: request identification
-        :param method: remote method to call
-        :param kwargs: kwargs
-        :param reply_to:  A queue for responses, defaults to None
-        """
-        self.client_id = client_id
-        self.request_id = request_id
-        self.identity = request_id.decode('utf-8')
-        self.method = method
-        self.kwargs = kwargs
-        self.reply_to = reply_to
-
-    def parts(self):
-        """
-        Return the request parts suitable to transmission over network
-
-        :return: a list consisting of [request_id, method_name, args_data
-        """
-        return [
-            self.request_id,
-            self.method.encode('utf-8'), msgpack.dumps(self.kwargs)
-        ]
-
-    @staticmethod
-    def create(client_id: bytes, request_id: bytes, method: bytes, arg_data: bytes, reply_to: queue.Queue = None):
-        """
-        Generate a request object from the raw information received through the network
-
-        :param client_id:  client identifier
-        :param request_id: request identifier
-        :param method: method name
-        :param arg_data: raw data for the arguments, msgpack encoded bytes
-        :param reply_to:  reply queue for responses to be sent to
-        :return: new Request object
-        """
-        args = msgpack.loads(arg_data)
-        return Request(
-            client_id,
-            request_id,
-            method.decode('utf-8'),
-            args if isinstance(args, dict) else {},
-            reply_to=reply_to
-        )
-
-    def reply(self, content, response_type: ResponseType = ResponseType.UPDATE):
-        """
-        Generate a response object from the current request and send it
-        to the reply queue.
-
-        :param content: content of the reply
-        :param response_type: Response type
-        :return: Response object
-        """
-        response = Response(
-            self.client_id, self.request_id, response_type, content
-        )
-        if self.reply_to is not None:
-            self.reply_to.put(response)
-        return response
-
-    def __str__(self):
-        req_id = '/'.join(self.request_id.decode('ascii').split('/')[-2:])
-        call_signature = log.log_call(self.method, (), self.kwargs, simple=True)
-        return f"req[{req_id}] - {call_signature}"
-
-
-class Response(object):
-    __slots__ = ('client_id', 'request_id', 'type', 'content', 'identity')
-
-    def __init__(self, client_id, request_id, response_type, content):
-        self.client_id = client_id
-        self.request_id = request_id
-        self.type = response_type
-        self.content = content
-        self.identity = request_id.decode('utf-8')
-
-    def parts(self):
-        """
-        Return the response parts suitable to transmission over network
-
-        :return: a list consisting of [client_id, request_id, response_type, response_data
-        """
-        return [
-            self.client_id, self.request_id,
-            msgpack.dumps(self.type.value), msgpack.dumps(self.content)
-        ]
-
-    @staticmethod
-    def create(client_id: bytes, request_id: bytes, response_type: bytes, content: bytes):
-        """
-        Generate a response object from the raw information received through the network
-
-        :param client_id:
-        :param request_id:
-        :param response_type:
-        :param content:
-        :return: new Response object
-        """
-        return Response(
-            client_id,
-            request_id,
-            ResponseType(msgpack.loads(response_type)),
-            msgpack.loads(content)
-        )
-
-    @staticmethod
-    def heartbeat(system_id: bytes = b'', methods: Sequence[str] = ()):
-        """
-        Generate a heartbeat response packet
-        :return: new Response object
-        """
-        content = methods
-        return Response(
-            system_id,
-            b'heartbeat',
-            ResponseType.HEARTBEAT,
-            content
-        ).parts()
-
-    def __str__(self):
-        req_id = '-'.join(self.request_id.decode('ascii').split('-')[-2:])
-        size = sys.getsizeof(self.content)
-        return f"req[{req_id}] - {self.type.name} {size} Bytes"
+def control(fn: Callable) -> Callable:
+    """Mark a Service remote__* method as a control RPC that bypasses load-balancing busy gates."""
+    fn._szrpc_control = True
+    return fn
 
 
 class Service(object):
@@ -186,11 +60,42 @@ class Service(object):
     PING_PACKET = b''
 
     def __init__(self, *args, **kwargs):
-        self.allowed_methods = tuple(
-            re.sub('^remote__', '', attr)
-            for attr in dir(self) if attr.startswith('remote__')
-        )
+        self.allowed_methods = self.get_methods()
         self.name_generator = namer.RandomGenerator()
+        self._publisher: Callable[[str, Any], None] | None = None
+
+    def publish(self, topic: str, payload: Any = None) -> None:
+        """Broadcast an unsolicited event to subscribed clients."""
+        if self._publisher is None:
+            raise RuntimeError('Service is not bound to a PUB-capable Worker transport')
+        self._publisher(topic, payload)
+
+    @classmethod
+    def get_description(cls) -> str:
+        """Get a description of the service type from the class name and docstring."""
+        return cls.__str__()
+
+    @classmethod
+    def get_methods(cls) -> tuple[str, ...]:
+        """Single source of truth for allowed remote__* method names on this Service."""
+        return tuple(
+            attr[len('remote__'):]
+            for attr in dir(cls) if attr.startswith('remote__')
+        )
+
+    @classmethod
+    def get_control_methods(cls) -> set[str]:
+        """Return remote method names decorated with @control."""
+        return {
+            attr[len('remote__'):]
+            for attr in dir(cls)
+            if attr.startswith('remote__') and getattr(getattr(cls, attr, None), '_szrpc_control', False)
+        }
+
+    @classmethod
+    def factory(cls, *args, **kwargs) -> functools.partial:
+        """Bind constructor arguments for deferred worker instantiation."""
+        return functools.partial(cls, *args, **kwargs)
 
     @classmethod
     def __str__(cls):
@@ -220,9 +125,10 @@ class Service(object):
         try:
             method = getattr(self, f'remote__{request.method}')
         except AttributeError:
-            logger.error(f'Service does not support remote method "{request.method}"')
+            msg = f'Service does not support remote method "{request.method}"'
+            logger.error(msg)
             request.reply(
-                content=f'Service does not support remote method "{request.method}"',
+                content={'type': 'AttributeError', 'message': msg, 'code': 'METHOD_NOT_FOUND'},
                 response_type=ResponseType.ERROR,
             )
         else:
@@ -230,10 +136,22 @@ class Service(object):
                 reply = method(request, **request.kwargs)
                 response_type = ResponseType.DONE
             except Exception as e:
-                reply = f'Error: {e}'
+                reply = {
+                    'type': type(e).__name__,
+                    'message': str(e),
+                    'code': getattr(e, 'code', None),
+                }
                 logger.exception(e)
                 response_type = ResponseType.ERROR
             request.reply(content=reply, response_type=response_type)
+
+    def on_start(self) -> None:
+        """Lifecycle hook called when the Worker starts."""
+        pass
+
+    def on_shutdown(self) -> None:
+        """Lifecycle hook called when the Worker exits."""
+        pass
 
     def remote__client_config(self, request: Request):
         """
@@ -249,44 +167,30 @@ class Service(object):
 
 
 class ServiceFactory(object):
-    """
-    A Factory which takes a service type class and arguments for instantiating it, and then creates
-    new instances as needed.
-    """
+    """Deprecated compatibility wrapper; prefer passing a Service class or Service.factory(...) directly."""
 
     def __init__(self, service_type: Type[Service], *args, **kwargs):
-        """
-        :param service_type: Service class
-        :param args: positional arguments for Service
-        :param kwargs: Keyword arguments for Service
-        """
         self.service_type = service_type
         self.args = args
         self.kwargs = kwargs
 
     def get_description(self) -> str:
-        """
-        Get a description of the service type from the class name and the docstring
-        :return: description string
-        """
-        return self.service_type.__str__()
+        return self.service_type.get_description()
 
     def get_methods(self) -> tuple:
-        """
-        Get a list of allowed remote methods for the service type
-        :return: list of method names
-        """
-        return tuple({
-            re.sub('^remote__', '', attr)
-            for attr in dir(self.service_type) if attr.startswith('remote__')
-        } | {'client_config'})
+        return self.service_type.get_methods()
 
-    def new(self):
-        """
-        Create a new Service instance
-        :return: Service object
-        """
+    def new(self) -> Service:
         return self.service_type(*self.args, **self.kwargs)
+
+
+def _resolve_service(target) -> tuple[Type[Service], Callable[[], Service]]:
+    """Normalize a Service class, Service.factory() partial, or legacy ServiceFactory."""
+    if isinstance(target, functools.partial):
+        return target.func, target
+    if isinstance(target, type) and issubclass(target, Service):
+        return target, target
+    return target.service_type, target.new
 
 
 class Worker(object):
@@ -294,18 +198,31 @@ class Worker(object):
     A worker which manages an instance of the Service. Each worker is able to perform the same tasks
     """
 
-    def __init__(self, backend: str, service: Service, methods: Sequence[str] = (), *args, **kwargs):
+    def __init__(
+        self,
+        backend: str,
+        service: Service,
+        methods: Sequence[str] = (),
+        *args,
+        transport: WorkerTransport | None = None,
+        pub_addr: str | None = None,
+        **kwargs,
+    ):
         """
         :param backend: Backend address to connect to
         :param service: A Service instance which provides the API for the server
         :param methods: List of remote methods supported by this worker instance
+        :param transport: Optional WorkerTransport adapter; defaults to ZmqWorkerTransport
+        :param pub_addr: Optional ZMQ PUB address (broker XSUB) for broadcast events
         """
 
         self.service = service
-        self.context = zmq.Context()
         self.backend = backend
+        self.pub_addr = pub_addr
         self.replies = queue.Queue()
         self.methods = methods
+        self.transport = transport
+        self._stop_event = Event()
 
     def is_supported(self, method: str) -> bool:
         """
@@ -320,97 +237,221 @@ class Worker(object):
         else:
             return method in self.methods
 
+    def stop(self) -> None:
+        """Signal the worker loop to stop."""
+        self._stop_event.set()
+
+    def close(self) -> None:
+        """Alias for stop()."""
+        self.stop()
+
+    def __enter__(self) -> 'Worker':
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()
+
     def run(self):
         """
         Main loop of the worker
         """
-        sock = self.context.socket(zmq.DEALER)
-        sock.identity = self.service.create_worker_id()
-        sock.connect(self.backend)
+        transport = self.transport or ZmqWorkerTransport(
+            self.backend,
+            self.service.create_worker_id(),
+            pub_addr=self.pub_addr,
+        )
+        if hasattr(transport, 'publish'):
+            self.service._publisher = transport.publish
+        active_requests: dict[str, Request] = {}
+        active_lock = Lock()
 
-        # initial heartbeat message
-        sock.send_multipart(Response.heartbeat(methods=self.methods))
-        last_message = time.time()
+        def _dispatch(req: Request) -> None:
+            try:
+                self.service.call_remote(req)
+            finally:
+                with active_lock:
+                    active_requests.pop(req.identity, None)
 
-        poller = zmq.Poller()
-        poller.register(sock, zmq.POLLIN)
+        try:
+            self.service.on_start()
+            # initial heartbeat message
+            transport.send(Response.heartbeat_message(methods=self.methods))
+            last_message = time.time()
 
-        while True:
-            while not self.replies.empty():
-                response = self.replies.get()
-                logger.debug(f'-> {response}')
-                sock.send_multipart(response.parts())
-                last_message = time.time()
+            while not self._stop_event.is_set():
+                while not self.replies.empty():
+                    response = self.replies.get()
+                    logger.debug(f'-> {response}')
+                    transport.send(response)
+                    last_message = time.time()
 
-            socks = dict(poller.poll(10))
-            if sock in socks and socks[sock] == zmq.POLLIN:
-                req_data = sock.recv_multipart()
-                try:
-                    request = Request.create(*req_data, reply_to=self.replies)
+                request = transport.recv(10)
+                if request is not None:
+                    if request.method == '__cancel__':
+                        target_id = request.kwargs.get('request_id', '')
+                        with active_lock:
+                            target = active_requests.get(target_id)
+                        if target is not None:
+                            target.cancel()
+                        continue
+
+                    request.reply_to = self.replies
                     logger.info(f'<- {request}')
                     if not self.is_supported(request.method):
                         logger.warning(f'Processing unsupported method `{request.method}`!')
-
-                except Exception as e:
-                    logger.error(f'Invalid request: {e}')
-                    logger.exception(e)
-                else:
-                    task = Thread(target=self.service.call_remote, args=(request,), daemon=True)
+                    with active_lock:
+                        active_requests[request.identity] = request
+                    task = Thread(target=_dispatch, args=(request,), daemon=True)
                     task.start()
 
-            # Send a heartbeat every so often when idle
-            if time.time() - last_message > MIN_HEARTBEAT_INTERVAL:
-                sock.send_multipart(Response.heartbeat(methods=self.methods))
-                last_message = time.time()
+                # Send a heartbeat every so often when idle
+                if time.time() - last_message > MIN_HEARTBEAT_INTERVAL:
+                    transport.send(Response.heartbeat_message(methods=self.methods))
+                    last_message = time.time()
+        finally:
+            try:
+                self.service.on_shutdown()
+            except Exception as exc:
+                logger.exception(exc)
+            transport.close()
 
 
-def start_worker(address: str, factory: ServiceFactory, methods: Sequence[str] = (), *args, **kwargs):
+def start_worker(address: str, factory, methods: Sequence[str] = (), pub_addr: str | None = None, *args, **kwargs):
     """
     Start a single worker in a subprocess
     :param address: backend address
-    :param factory: Service Factory
+    :param factory: Service class, Service.factory(), or ServiceFactory
     :param methods: List of remote methods supported by this worker instance
+    :param pub_addr: Optional ZMQ PUB address (broker XSUB)
     """
-    service = factory.new()
-    worker = Worker(address, service, methods=methods, *args, **kwargs)
+    _, make_service = _resolve_service(factory)
+    service = make_service()
+    worker = Worker(address, service, methods=methods, pub_addr=pub_addr, *args, **kwargs)
     logger.debug(f'Starting new worker process: {os.getpid()}')
     return worker.run()
 
 
+class MonitorPort(Protocol):
+    """Port for recording broker RPC lifecycle events."""
+
+    def record_request(self, worker_id: str, client_id: str, request_id: str, method: str, kwargs: dict[str, Any]) -> None: ...
+    def record_response(self, worker_id: str, request_id: str, status: str, result: Any) -> None: ...
+    def update_worker(self, worker_id: str) -> None: ...
+    def clear_workers(self, workers: Sequence[str]) -> None: ...
+
+
+class NullMonitor:
+    """No-op MonitorPort adapter used when monitoring is disabled."""
+
+    def record_request(self, worker_id: str, client_id: str, request_id: str, method: str, kwargs: dict[str, Any]) -> None:
+        pass
+
+    def record_response(self, worker_id: str, request_id: str, status: str, result: Any) -> None:
+        pass
+
+    def update_worker(self, worker_id: str) -> None:
+        pass
+
+    def clear_workers(self, workers: Sequence[str]) -> None:
+        pass
+
+
 class Server(object):
     def __init__(
-            self,
-            service_factory: ServiceFactory,
-            ports: tuple = (9990, 9991),
-            instances: int = 1,
-            monitor_port: int = None
+        self,
+        service_factory,
+        ports: tuple = (9990, 9991),
+        instances: int = 1,
+        monitor_port: int = None,
+        transport: BrokerTransport | None = None,
+        monitor: MonitorPort | None = None,
+        threaded: bool = False,
+        worker_transport_factory: Callable[[], WorkerTransport] | None = None,
+        client_timeout: float | None = None,
+        pub_port: int | None = None,
     ):
         """
-        :param service_factory: A Service factory which creates service instances
+        :param service_factory: A Service class, Service.factory(), or ServiceFactory
         :param ports: a tuple of ports for frontend, backend
         :param instances: Number of workers to start on server. Additional workers can be started on other hosts
         :param monitor_port: alternate way to specify a monitor port
+        :param transport: Optional BrokerTransport adapter; defaults to ZmqBrokerTransport
+        :param monitor: Optional MonitorPort adapter; defaults to NullMonitor unless monitor_port is set
+        :param threaded: If True, run workers in-process in daemon threads instead of multiprocessing.Process
+        :param worker_transport_factory: Optional factory for WorkerTransport when threaded=True
+        :param client_timeout: Optional seconds of inactivity before cancelling a client's active requests
+        :param pub_port: Optional port for XPUB broadcast events (binds XSUB on pub_port + 1)
         """
+        self.service_type, _ = _resolve_service(service_factory)
         self.service_factory = service_factory
         self.frontend_addr = f'tcp://*:{ports[0]}'
         self.backend_addr = f'tcp://*:{ports[1]}'
-        self.context = zmq.Context()
-        self.manager = WorkerManager(self.service_factory, self.backend_addr, instances=instances)
-        self.monitor = None
+        self.pub_addr = f'tcp://*:{pub_port}' if pub_port is not None else None
+        self.xsub_addr = f'tcp://*:{pub_port + 1}' if pub_port is not None else None
+        self.transport = transport
+        self._stop_event = Event()
+        self._broker_thread: Thread | None = None
+        self.client_timeout = client_timeout
+        self.manager = WorkerManager(
+            self.service_factory,
+            self.backend_addr,
+            instances=instances,
+            threaded=threaded,
+            worker_transport_factory=worker_transport_factory,
+            pub_addr=self.xsub_addr,
+        )
+        self.monitor: MonitorPort = NullMonitor()
 
-        if DASH_ENABLED and monitor_port:
+        if monitor is not None:
+            self.monitor = monitor
+        elif DASH_ENABLED and monitor_port:
             info = {
                 'host': socket.getfqdn().split('.')[0].upper(),
                 'version': f"v{__version__}",
                 'frontend': self.frontend_addr,
                 'backend': self.backend_addr,
-                'description': self.service_factory.get_description(),
-                'methods': self.service_factory.get_methods()
+                'description': self.service_type.get_description(),
+                'methods': self.service_type.get_methods()
             }
             self.monitor = mon.Monitor(service_info=info)
             mon.start_monitor_thread(self.monitor, port=monitor_port)
         elif monitor_port:
             logger.warning('Dashboard not enabled. Please run "pip install szrpc[dash] to enable it"')
+
+    def start(
+        self,
+        balancing: bool = False,
+        proxy: Literal['simple', 'balancing', 'round-robin'] = 'round-robin',
+    ) -> Thread:
+        """Start the broker loop in a background daemon thread and return it."""
+        self._broker_thread = Thread(
+            target=self.run,
+            kwargs={'balancing': balancing, 'proxy': proxy},
+            daemon=True,
+        )
+        self._broker_thread.start()
+        return self._broker_thread
+
+    def stop(self) -> None:
+        """Signal the broker loop to stop and terminate managed workers."""
+        self._stop_event.set()
+        self.manager.stop_workers()
+        if (
+            self._broker_thread is not None
+            and self._broker_thread is not current_thread()
+            and self._broker_thread.is_alive()
+        ):
+            self._broker_thread.join(timeout=1.0)
+
+    def close(self) -> None:
+        """Alias for stop()."""
+        self.stop()
+
+    def __enter__(self) -> 'Server':
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()
 
     def run(self, balancing=False, proxy: Literal['simple', 'balancing', 'round-robin'] = 'round-robin'):
         """
@@ -435,284 +476,306 @@ class Server(object):
 
     def _setup_sockets(self, front=zmq.ROUTER, back=zmq.ROUTER) -> tuple:
         """
-        Setup zmq frontend and backend sockets and start worker processes
-        :param front:
-        :param back:
-        :return:
+        Setup raw zmq frontend and backend sockets and start worker processes (used by simple_proxy).
         """
-        frontend = self.context.socket(front)
-        backend = self.context.socket(back)
+        ctx = zmq.Context()
+        frontend = ctx.socket(front)
+        backend = ctx.socket(back)
         frontend.bind(self.frontend_addr)
         backend.bind(self.backend_addr)
         logger.info(f'Listening for tasks from: {self.frontend_addr}')
         logger.info(f'Listening for workers at: {self.backend_addr}')
 
         self.manager.start_workers()
-        return frontend, backend
+        return ctx, frontend, backend
 
-    def _process_response(self, worker, reply, frontend):
-        try:
-            response = Response.create(*reply[1:])
-        except Exception as e:
-            logger.error(f"Invalid response from worker {worker}: {e}")
-            return None
-
-        if response.type != ResponseType.HEARTBEAT:
-            frontend.send_multipart(response.parts())
-            if self.monitor:
-                self.monitor.record_response(
-                    worker.decode('utf-8'),
-                    response.identity,
-                    response.type.name,
-                    response.content
-                )
-        elif self.monitor:
+    def _process_response(self, worker: bytes, response: Response, transport: BrokerTransport):
+        if response.type not in (ResponseType.HEARTBEAT, ResponseType.READY):
+            transport.send_to_client(response)
+            self.monitor.record_response(
+                worker.decode('utf-8'),
+                response.identity,
+                response.type.name,
+                response.content,
+            )
+        else:
             self.monitor.update_worker(worker.decode('utf-8'))
 
-        return response
-
-    def _monitor_request(self, worker, request):
-        if self.monitor:
-            try:
-                req_obj = Request.create(*request)
-                self.monitor.record_request(
-                    worker.decode('utf-8'),
-                    req_obj.client_id.decode('utf-8'),
-                    req_obj.identity,
-                    req_obj.method,
-                    req_obj.kwargs
-                )
-            except Exception as e:
-                logger.error(f"Failed to record request in monitor: {e}")
+    def _monitor_request(self, worker: bytes, request: Request):
+        try:
+            self.monitor.record_request(
+                worker.decode('utf-8'),
+                request.client_id.decode('utf-8'),
+                request.identity,
+                request.method,
+                request.kwargs,
+            )
+        except Exception as e:
+            logger.error(f"Failed to record request in monitor: {e}")
 
     def _monitor_cleanup(self, workers):
         """
         Remove active jobs if their workers disappear. This is called when a worker is removed from the pool due to
         inactivity or failure.
-        :param workers: sequence of workers to remove from the monitor
+        :param workers: sequence of worker ID bytes to remove from the monitor
         """
-        if self.monitor:
-            self.monitor.clear_workers(workers)
+        self.monitor.clear_workers([w.decode('utf-8') for w in workers])
 
     def simple_proxy(self):
         """
         A simple proxy which forwards all messages from the front-end to the back-end in round-robin fashion.
         """
-        frontend, backend = self._setup_sockets(zmq.ROUTER, zmq.DEALER)
-        zmq.proxy(frontend, backend)
+        ctx, frontend, backend = self._setup_sockets(zmq.ROUTER, zmq.DEALER)
+        try:
+            zmq.proxy(frontend, backend)
+        finally:
+            frontend.close(linger=0)
+            backend.close(linger=0)
+            ctx.term()
 
-        frontend.close()
-        backend.close()
+    def _select_worker(
+        self,
+        method: str,
+        worker_queue: list[bytes],
+        worker_methods: dict[bytes, set[str]],
+    ) -> bytes | None:
+        """Pick the next available worker supporting `method`, or fall back to the head of `worker_queue`."""
+        if not worker_queue:
+            return None
+        for i, worker in enumerate(worker_queue):
+            w_methods = worker_methods.get(worker, set())
+            if not w_methods or method in w_methods:
+                return worker_queue.pop(i)
+        logger.warning(f'No available workers support method `{method}`!')
+        return worker_queue.pop(0)
+
+    def _run_broker(self, strategy: Literal['round-robin', 'balancing']) -> None:
+        """Unified broker loop supporting 'round-robin' and 'balancing' routing strategies."""
+        transport = self.transport or ZmqBrokerTransport(
+            self.frontend_addr,
+            self.backend_addr,
+            pub_addr=self.pub_addr,
+            xsub_addr=self.xsub_addr,
+        )
+        if self.transport is None:
+            logger.info(f'Listening for tasks from: {self.frontend_addr}')
+            logger.info(f'Listening for workers at: {self.backend_addr}')
+        self.manager.start_workers()
+
+        worker_times: dict[bytes, float] = {}
+        worker_methods: dict[bytes, set[str]] = {}
+        worker_queue: list[bytes] = []
+        control_methods = self.service_type.get_control_methods()
+        pending_requests: deque[Request] = deque()
+        active_request_worker: dict[str, bytes] = {}
+        active_client_requests: dict[bytes, set[str]] = defaultdict(set)
+        client_last_seen: dict[bytes, float] = {}
+
+        try:
+            while not self._stop_event.is_set():
+                accept_clients = bool(worker_queue) or (bool(control_methods) and bool(worker_times))
+                backend_replies, frontend_requests = transport.poll(
+                    10, accept_clients=accept_clients
+                )
+
+                for worker, response in backend_replies:
+                    worker_is_new = worker not in worker_times
+                    worker_times[worker] = time.time()
+                    self._process_response(worker, response, transport)
+
+                    if response.type in (ResponseType.DONE, ResponseType.ERROR):
+                        active_request_worker.pop(response.identity, None)
+                        active_client_requests.get(response.client_id, set()).discard(response.identity)
+
+                    if response.type == ResponseType.HEARTBEAT:
+                        try:
+                            w_methods = set(response.content)
+                        except (ValueError, TypeError):
+                            w_methods = set()
+                        worker_methods[worker] = w_methods
+                    elif (
+                        strategy == 'balancing'
+                        and response.type in (ResponseType.DONE, ResponseType.ERROR, ResponseType.READY)
+                        and worker not in worker_queue
+                    ):
+                        worker_queue.append(worker)
+
+                    if worker_is_new:
+                        worker_queue.append(worker)
+                        suffix = ','.join(worker_methods.get(worker, set())) or 'All'
+                        logger.info(f'Workers [{len(worker_times):4d}], + : {worker.decode("utf-8")} | {suffix}')
+
+                now = time.time()
+                expired = now - MAX_HEARTBEAT_INTERVAL
+                removed = [w for w, t in worker_times.items() if t <= expired]
+                if removed:
+                    removed_set = set(removed)
+                    worker_times = {w: t for w, t in worker_times.items() if w not in removed_set}
+                    worker_queue = [w for w in worker_queue if w not in removed_set]
+                    worker_methods = {w: m for w, m in worker_methods.items() if w not in removed_set}
+                    removed_workers = ', '.join(w.decode('utf-8') for w in removed)
+                    logger.warning(f'Workers [{len(worker_times):4d}], - : {removed_workers}')
+                    self._monitor_cleanup(removed)
+
+                if self.client_timeout is not None:
+                    stale_clients = [c for c, t in client_last_seen.items() if now - t > self.client_timeout]
+                    for cid in stale_clients:
+                        client_last_seen.pop(cid, None)
+                        for req_id in active_client_requests.pop(cid, set()):
+                            target_worker = active_request_worker.pop(req_id, None)
+                            if target_worker in worker_times:
+                                cancel_req = Request(cid, b'disconnect-cancel', '__cancel__', {'request_id': req_id})
+                                transport.send_to_worker(target_worker, cancel_req)
+
+                for req in frontend_requests:
+                    client_last_seen[req.client_id] = now
+
+                pending_requests.extend(frontend_requests)
+                deferred: deque[Request] = deque()
+
+                while pending_requests:
+                    request = pending_requests.popleft()
+                    if request.method == '__cancel__':
+                        target_id = request.kwargs.get('request_id', '')
+                        target_worker = active_request_worker.get(target_id)
+                        if target_worker in worker_times:
+                            transport.send_to_worker(target_worker, request)
+                        continue
+
+                    if request.method in ('client_config', 'ping'):
+                        content = '' if request.method == 'ping' else self.service_type.get_methods()
+                        transport.send_to_client(request.reply(content, ResponseType.DONE))
+                        continue
+
+                    if not worker_times:
+                        transport.send_to_client(
+                            request.reply(
+                                {'type': 'RuntimeError', 'message': 'No workers available', 'code': 'NO_WORKERS'},
+                                ResponseType.ERROR,
+                            )
+                        )
+                        continue
+
+                    if request.method in control_methods and not worker_queue:
+                        live_pool = list(worker_times.keys())
+                        worker = self._select_worker(request.method, live_pool, worker_methods)
+                    else:
+                        worker = self._select_worker(request.method, worker_queue, worker_methods)
+                        if worker is None:
+                            deferred.append(request)
+                            continue
+                        if strategy == 'round-robin':
+                            worker_queue.append(worker)
+
+                    active_request_worker[request.identity] = worker
+                    active_client_requests[request.client_id].add(request.identity)
+                    transport.send_to_worker(worker, request)
+                    self._monitor_request(worker, request)
+
+                pending_requests = deferred
+        finally:
+            transport.close()
 
     def round_robin_proxy(self):
         """
         A proxy which forwards all messages from the front-end to the back-end in round-robin fashion.
         This proxy supports heterogeneous workers.
         """
-        frontend, backend = self._setup_sockets()
-        poller = zmq.Poller()
-        poller.register(backend, zmq.POLLIN)
-        backend_ready = False
-        worker_times = {}
-        worker_methods = {}
-        worker_queue = []
-
-        try:
-            while True:
-                sockets = dict(poller.poll(10))
-
-                if backend in sockets:
-                    reply = backend.recv_multipart()
-                    worker = reply[0]
-                    worker_is_new = worker not in worker_times
-                    worker_times[worker] = time.time()
-                    response = self._process_response(worker, reply, frontend)
-
-                    # record worker methods
-                    _suffix = 'All'
-                    if response and response.type == ResponseType.HEARTBEAT:
-                        try:
-                            w_methods = set(response.content)
-                        except (ValueError, TypeError):
-                            w_methods = set()
-                        worker_methods[worker] = w_methods
-                        _suffix = ','.join(worker_methods[worker]) if worker_methods[worker] else _suffix
-
-                    if worker_is_new:
-                        worker_queue.append(worker)
-                        logger.info(f'Workers [{len(worker_times):4d}], + : {worker.decode("utf-8")} | {_suffix}')
-
-                # check and expire workers who haven't chatted in while
-                expired = time.time() - MAX_HEARTBEAT_INTERVAL
-                removed = [w for w, t in worker_times.items() if t <= expired]
-                worker_times = {w: t for w, t in worker_times.items() if t > expired}
-                worker_queue = [w for w in worker_queue if w in worker_times]
-                worker_methods = {w: m for w, m in worker_methods.items() if w not in removed}
-                if removed:
-                    removed_workers = ', '.join([w.decode('utf-8') for w in removed])
-                    logger.warning(f'Workers [{len(worker_times):4d}], - : {removed_workers}')
-                    self._monitor_cleanup(removed)
-
-                if worker_times and not backend_ready:
-                    # Poll for clients now that a worker is available and backend was not ready
-                    poller.register(frontend, zmq.POLLIN)
-                    backend_ready = True
-                elif backend_ready and not worker_times:
-                    poller.unregister(frontend)
-                    backend_ready = False
-
-                if frontend in sockets:
-                    raw_request = frontend.recv_multipart()
-                    request = Request.create(*raw_request)
-
-                    if request.method in ['client_config', 'ping']:
-                        content = '' if request.method == 'ping' else self.service_factory.get_methods()
-                        response = request.reply(content, ResponseType.DONE)
-                        frontend.send_multipart(response.parts())
-                        continue
-
-                    # find supported worker and send command
-                    for i in range(len(worker_queue)):
-                        worker = worker_queue[i]
-                        w_methods = worker_methods.get(worker, set())
-                        accepts_method = (not w_methods) or request.method in w_methods
-                        if accepts_method:
-                            # cycle worker from front to back of queue
-                            worker = worker_queue.pop(i)
-                            worker_queue.append(worker)
-
-                            # send task to worker
-                            backend.send_multipart([worker] + raw_request)
-                            self._monitor_request(worker, raw_request)
-                            break
-                    else:
-                        logger.warning(f'No available workers support method `{request.method}`!')
-                        worker = worker_queue.pop(0)
-                        worker_queue.append(worker)
-                        backend.send_multipart([worker] + raw_request)
-                        self._monitor_request(worker, raw_request)
-
-        finally:
-            frontend.close()
-            backend.close()
+        self._run_broker('round-robin')
 
     def load_balancing_proxy(self):
         """
         A proxy which performs basic load balancing. That is a busy worker is removed from the worker pool until
-        it's current task is completed. At that point, it's added back to the pool for the next task
-        :return:
+        it's current task is completed. At that point, it's added back to the pool for the next task.
         """
-        frontend, backend = self._setup_sockets()
-        poller = zmq.Poller()
-        poller.register(backend, zmq.POLLIN)
-        community = set()
-        workers = {}
-        backend_ready = False
-
-        try:
-            while True:
-                sockets = dict(poller.poll(10))
-
-                if backend in sockets:
-                    # Handle worker activity on the backend
-                    reply = backend.recv_multipart()
-                    worker = reply[0]
-
-                    # Update heartbeat time every time we receive something from a worker that's on the list
-                    # or if it is a new member of a community
-                    if worker in workers or worker not in community:
-                        workers[worker] = time.time()
-
-                    # Add worker to community if needed
-                    if worker not in community:
-                        community.add(worker)
-                        logger.debug(f'Workers [{len(workers):4d}], + : {worker.decode("utf-8")}')
-
-                    response = self._process_response(worker, reply, frontend)
-                    if not response:
-                        continue
-
-                    # Add worker to list if a previous task completes or fails
-                    if response.type in [ResponseType.DONE, ResponseType.ERROR] and worker not in workers:
-                        workers[worker] = time.time()
-
-                    if workers and not backend_ready:
-                        # Poll for clients now that a worker is available and backend was not ready
-                        poller.register(frontend, zmq.POLLIN)
-                        backend_ready = True
-
-                # check and expire workers who haven't chatted in while
-                if workers:
-                    expired = time.time() - MAX_HEARTBEAT_INTERVAL
-                    removed = [w for w, t in workers.items() if t <= expired]
-                    workers = {w: t for w, t in workers.items() if t > expired}
-                    if removed:
-                        removed_workers = ', '.join([w.decode('utf-8') for w in removed])
-                        logger.debug(f'Workers [{len(workers):4d}], - : {removed_workers}')
-                        community.difference_update(removed)
-                        self._monitor_cleanup(removed)
-
-                if frontend in sockets:
-                    # Get next client request, route to last-used worker, the oldest item in workers dictionary
-                    raw_request = frontend.recv_multipart()
-                    request = Request.create(*raw_request)
-
-                    if request.method in ['client_config', 'ping']:
-                        content = '' if request.method == 'ping' else self.service_factory.get_methods()
-                        response = request.reply(content, ResponseType.DONE)
-                        frontend.send_multipart(response.parts())
-                        continue
-
-                    worker = next(iter(workers))
-                    workers.pop(worker)     # remove worker from list as it is now busy
-                    backend.send_multipart([worker] + raw_request)
-                    self._monitor_request(worker, raw_request)
-
-                    # Don't poll clients if no workers are available and set backend_ready flag to false
-                    if not workers:
-                        poller.unregister(frontend)
-                        backend_ready = False
-        finally:
-            frontend.close()
-            backend.close()
+        self._run_broker('balancing')
 
 
 class WorkerManager(object):
-    def __init__(self, factory: ServiceFactory, address: str, instances: int = 1, methods: Sequence[str] = ()):
+    def __init__(
+        self,
+        factory,
+        address: str,
+        instances: int = 1,
+        methods: Sequence[str] = (),
+        threaded: bool = False,
+        worker_transport_factory: Callable[[], WorkerTransport] | None = None,
+        pub_addr: str | None = None,
+    ):
         """
-        :param factory:  A ServiceFactory instance
+        :param factory: Service class, Service.factory(), or ServiceFactory
         :param address: Backend address to connect to
         :param instances: Number of worker instances to manage
         :param methods: List of allowed methods to run
+        :param threaded: Run workers in-process in threads instead of multiprocessing.Process
+        :param worker_transport_factory: Optional factory for WorkerTransport when threaded=True
+        :param pub_addr: Optional ZMQ XSUB address for worker PUB sockets
         """
         self.factory = factory
         self.backend_addr = address.replace('*', 'localhost')
+        self.pub_addr = pub_addr.replace('*', 'localhost') if pub_addr else None
         self.instances = instances
         self.methods = methods
-        self.processes = []
+        self.threaded = threaded
+        self.worker_transport_factory = worker_transport_factory
+        self.processes: list[Process] = []
+        self._workers: list[Worker] = []
+        self._threads: list[Thread] = []
 
     def start_workers(self):
-        """
-        Start subprocesses for each worker
-        :return:
-        """
-
+        """Start subprocesses or in-process threads for each worker."""
         self.processes = []
-        for i in range(self.instances):
-            p = Process(target=start_worker, args=(self.backend_addr, self.factory, self.methods))
-            p.start()
-            self.processes.append(p)
+        self._workers = []
+        self._threads = []
+        _, make_service = _resolve_service(self.factory)
+
+        for _ in range(self.instances):
+            if self.threaded:
+                transport = self.worker_transport_factory() if self.worker_transport_factory else None
+                worker = Worker(
+                    self.backend_addr,
+                    make_service(),
+                    methods=self.methods,
+                    transport=transport,
+                    pub_addr=self.pub_addr,
+                )
+                t = Thread(target=worker.run, daemon=True)
+                t.start()
+                self._workers.append(worker)
+                self._threads.append(t)
+            else:
+                p = Process(target=start_worker, args=(self.backend_addr, self.factory, self.methods, self.pub_addr))
+                p.start()
+                self.processes.append(p)
         if self.instances:
-            logger.info(f'Connected {self.instances} worker(s) to {self.backend_addr}')
+            mode = 'threaded' if self.threaded else 'process'
+            logger.info(f'Connected {self.instances} {mode} worker(s) to {self.backend_addr}')
             _method_txt = ','.join(self.methods) if self.methods else 'All'
             logger.info(f'Supported methods: {_method_txt}')
 
+    def stop_workers(self):
+        """Stop any running worker threads and terminate worker subprocesses."""
+        for worker in self._workers:
+            worker.stop()
+        caller = current_thread()
+        for t in self._threads:
+            if t is not caller and t.is_alive():
+                t.join(timeout=1.0)
+        self._workers = []
+        self._threads = []
+
+        for proc in self.processes:
+            if proc.is_alive():
+                proc.terminate()
+                proc.join(timeout=1.0)
+        self.processes = []
+
     def wait_for_workers(self):
-        """
-        Wait for all worker processes to terminate
-        """
+        """Wait for all worker processes and threads to terminate."""
         for proc in self.processes:
             proc.join()
+        for t in self._threads:
+            t.join()
 
     def run(self):
         self.start_workers()
