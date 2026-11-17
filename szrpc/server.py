@@ -7,10 +7,10 @@ import sys
 import time
 import queue
 import socket
-from collections import deque
+from collections import defaultdict, deque
 
 from typing import Any, Callable, Protocol, Type, Literal, Sequence
-from threading import Event, Thread, current_thread
+from threading import Event, Lock, Thread, current_thread
 from multiprocessing import Process
 
 import zmq
@@ -246,6 +246,15 @@ class Worker(object):
         Main loop of the worker
         """
         transport = self.transport or ZmqWorkerTransport(self.backend, self.service.create_worker_id())
+        active_requests: dict[str, Request] = {}
+        active_lock = Lock()
+
+        def _dispatch(req: Request) -> None:
+            try:
+                self.service.call_remote(req)
+            finally:
+                with active_lock:
+                    active_requests.pop(req.identity, None)
 
         try:
             self.service.on_start()
@@ -262,11 +271,21 @@ class Worker(object):
 
                 request = transport.recv(10)
                 if request is not None:
+                    if request.method == '__cancel__':
+                        target_id = request.kwargs.get('request_id', '')
+                        with active_lock:
+                            target = active_requests.get(target_id)
+                        if target is not None:
+                            target.cancel()
+                        continue
+
                     request.reply_to = self.replies
                     logger.info(f'<- {request}')
                     if not self.is_supported(request.method):
                         logger.warning(f'Processing unsupported method `{request.method}`!')
-                    task = Thread(target=self.service.call_remote, args=(request,), daemon=True)
+                    with active_lock:
+                        active_requests[request.identity] = request
+                    task = Thread(target=_dispatch, args=(request,), daemon=True)
                     task.start()
 
                 # Send a heartbeat every so often when idle
@@ -331,6 +350,7 @@ class Server(object):
         monitor: MonitorPort | None = None,
         threaded: bool = False,
         worker_transport_factory: Callable[[], WorkerTransport] | None = None,
+        client_timeout: float | None = None,
     ):
         """
         :param service_factory: A Service class, Service.factory(), or ServiceFactory
@@ -341,6 +361,7 @@ class Server(object):
         :param monitor: Optional MonitorPort adapter; defaults to NullMonitor unless monitor_port is set
         :param threaded: If True, run workers in-process in daemon threads instead of multiprocessing.Process
         :param worker_transport_factory: Optional factory for WorkerTransport when threaded=True
+        :param client_timeout: Optional seconds of inactivity before cancelling a client's active requests
         """
         self.service_type, _ = _resolve_service(service_factory)
         self.service_factory = service_factory
@@ -349,6 +370,7 @@ class Server(object):
         self.transport = transport
         self._stop_event = Event()
         self._broker_thread: Thread | None = None
+        self.client_timeout = client_timeout
         self.manager = WorkerManager(
             self.service_factory,
             self.backend_addr,
@@ -518,6 +540,9 @@ class Server(object):
         worker_queue: list[bytes] = []
         control_methods = self.service_type.get_control_methods()
         pending_requests: deque[Request] = deque()
+        active_request_worker: dict[str, bytes] = {}
+        active_client_requests: dict[bytes, set[str]] = defaultdict(set)
+        client_last_seen: dict[bytes, float] = {}
 
         try:
             while not self._stop_event.is_set():
@@ -530,6 +555,10 @@ class Server(object):
                     worker_is_new = worker not in worker_times
                     worker_times[worker] = time.time()
                     self._process_response(worker, response, transport)
+
+                    if response.type in (ResponseType.DONE, ResponseType.ERROR):
+                        active_request_worker.pop(response.identity, None)
+                        active_client_requests.get(response.client_id, set()).discard(response.identity)
 
                     if response.type == ResponseType.HEARTBEAT:
                         try:
@@ -549,7 +578,8 @@ class Server(object):
                         suffix = ','.join(worker_methods.get(worker, set())) or 'All'
                         logger.info(f'Workers [{len(worker_times):4d}], + : {worker.decode("utf-8")} | {suffix}')
 
-                expired = time.time() - MAX_HEARTBEAT_INTERVAL
+                now = time.time()
+                expired = now - MAX_HEARTBEAT_INTERVAL
                 removed = [w for w, t in worker_times.items() if t <= expired]
                 if removed:
                     removed_set = set(removed)
@@ -560,11 +590,31 @@ class Server(object):
                     logger.warning(f'Workers [{len(worker_times):4d}], - : {removed_workers}')
                     self._monitor_cleanup(removed)
 
+                if self.client_timeout is not None:
+                    stale_clients = [c for c, t in client_last_seen.items() if now - t > self.client_timeout]
+                    for cid in stale_clients:
+                        client_last_seen.pop(cid, None)
+                        for req_id in active_client_requests.pop(cid, set()):
+                            target_worker = active_request_worker.pop(req_id, None)
+                            if target_worker in worker_times:
+                                cancel_req = Request(cid, b'disconnect-cancel', '__cancel__', {'request_id': req_id})
+                                transport.send_to_worker(target_worker, cancel_req)
+
+                for req in frontend_requests:
+                    client_last_seen[req.client_id] = now
+
                 pending_requests.extend(frontend_requests)
                 deferred: deque[Request] = deque()
 
                 while pending_requests:
                     request = pending_requests.popleft()
+                    if request.method == '__cancel__':
+                        target_id = request.kwargs.get('request_id', '')
+                        target_worker = active_request_worker.get(target_id)
+                        if target_worker in worker_times:
+                            transport.send_to_worker(target_worker, request)
+                        continue
+
                     if request.method in ('client_config', 'ping'):
                         content = '' if request.method == 'ping' else self.service_type.get_methods()
                         transport.send_to_client(request.reply(content, ResponseType.DONE))
@@ -590,6 +640,8 @@ class Server(object):
                         if strategy == 'round-robin':
                             worker_queue.append(worker)
 
+                    active_request_worker[request.identity] = worker
+                    active_client_requests[request.client_id].add(request.identity)
                     transport.send_to_worker(worker, request)
                     self._monitor_request(worker, request)
 

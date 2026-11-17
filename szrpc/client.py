@@ -181,11 +181,25 @@ class Client(object):
         kwargs = {} if kwargs is None else kwargs
         request = Request(self.client_id, request_id, method, kwargs)
         logger.debug(f'~> {request}')
-        result = Result(request_id, dispatcher=self.dispatcher)
+        result = Result(
+            request_id,
+            dispatcher=self.dispatcher,
+            on_cancel=lambda: self.cancel_request(request_id),
+        )
         with self._results_lock:
             self._results[request_id] = result
         self.requests.put(request)
         return result
+
+    def cancel_request(self, request_id: bytes) -> None:
+        """Send a cancellation control message for an in-flight request."""
+        cancel_req = Request(
+            self.client_id,
+            self.create_request_id(),
+            '__cancel__',
+            {'request_id': request_id.decode('utf-8')},
+        )
+        self.requests.put(cancel_req)
 
     def send_requests(self):
         """

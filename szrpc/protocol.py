@@ -3,7 +3,8 @@ from __future__ import annotations
 import queue
 import sys
 from enum import Enum
-from typing import Sequence
+from threading import Event, Lock
+from typing import Callable, Sequence
 
 import msgpack
 
@@ -21,7 +22,17 @@ class ResponseType(Enum):
 class Request:
     """RPC request message with wire encoding and reply helper."""
 
-    __slots__ = ('client_id', 'request_id', 'method', 'kwargs', 'reply_to', 'identity')
+    __slots__ = (
+        'client_id',
+        'request_id',
+        'method',
+        'kwargs',
+        'reply_to',
+        'identity',
+        'cancelled',
+        '_cancel_callbacks',
+        '_cancel_lock',
+    )
 
     def __init__(
         self,
@@ -37,6 +48,35 @@ class Request:
         self.method = method
         self.kwargs = kwargs
         self.reply_to = reply_to
+        self.cancelled = Event()
+        self._cancel_callbacks: list[Callable[[], None]] = []
+        self._cancel_lock = Lock()
+
+    def is_cancelled(self) -> bool:
+        """Return True if this request has been cancelled."""
+        return self.cancelled.is_set()
+
+    def on_cancel(self, callback: Callable[[], None]) -> None:
+        """Register a callback invoked when the request is cancelled (or immediately if already cancelled)."""
+        run_now = False
+        with self._cancel_lock:
+            if self.cancelled.is_set():
+                run_now = True
+            else:
+                self._cancel_callbacks.append(callback)
+        if run_now:
+            callback()
+
+    def cancel(self) -> None:
+        """Mark the request as cancelled and invoke any registered on_cancel callbacks."""
+        with self._cancel_lock:
+            if self.cancelled.is_set():
+                return
+            self.cancelled.set()
+            callbacks = list(self._cancel_callbacks)
+            self._cancel_callbacks.clear()
+        for cb in callbacks:
+            cb()
 
     def encode_payload(self) -> list[bytes]:
         """Return [request_id, method_bytes, msgpack_kwargs] without routing client_id."""

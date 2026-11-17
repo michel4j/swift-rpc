@@ -37,9 +37,15 @@ class Result:
         '_next_token',
         '_lock',
         '_dispatcher',
+        '_on_cancel',
     )
 
-    def __init__(self, result_id: bytes, dispatcher: Dispatcher | None = None):
+    def __init__(
+        self,
+        result_id: bytes,
+        dispatcher: Dispatcher | None = None,
+        on_cancel: Callable[[], None] | None = None,
+    ):
         self.identity = result_id.decode('utf-8')
         self.result_id = result_id
         self.parts: list[Any] = []
@@ -53,6 +59,12 @@ class Result:
         self._next_token = 1
         self._lock = Lock()
         self._dispatcher: Dispatcher = dispatcher if dispatcher is not None else DirectDispatcher()
+        self._on_cancel = on_cancel
+
+    def cancel(self) -> None:
+        """Request cancellation of the remote call if not already finished."""
+        if not self.is_ready() and self._on_cancel is not None:
+            self._on_cancel()
 
     def connect(self, signal: str, slot: Callable, *args, **kwargs) -> int:
         """Connect a handler to `signal`; returns a stable integer token for disconnect()."""
