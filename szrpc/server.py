@@ -9,7 +9,7 @@ import queue
 import socket
 
 from typing import Any, Callable, Protocol, Type, Literal, Sequence
-from threading import Event, Thread
+from threading import Event, Thread, current_thread
 from multiprocessing import Process
 
 import zmq
@@ -117,6 +117,14 @@ class Service(object):
                 response_type = ResponseType.ERROR
             request.reply(content=reply, response_type=response_type)
 
+    def on_start(self) -> None:
+        """Lifecycle hook called when the Worker starts."""
+        pass
+
+    def on_shutdown(self) -> None:
+        """Lifecycle hook called when the Worker exits."""
+        pass
+
     def remote__client_config(self, request: Request):
         """
         Called by clients on connect. Return a list of allowed methods to call
@@ -219,6 +227,7 @@ class Worker(object):
         transport = self.transport or ZmqWorkerTransport(self.backend, self.service.create_worker_id())
 
         try:
+            self.service.on_start()
             # initial heartbeat message
             transport.send(Response.heartbeat_message(methods=self.methods))
             last_message = time.time()
@@ -244,6 +253,10 @@ class Worker(object):
                     transport.send(Response.heartbeat_message(methods=self.methods))
                     last_message = time.time()
         finally:
+            try:
+                self.service.on_shutdown()
+            except Exception as exc:
+                logger.exception(exc)
             transport.close()
 
 
@@ -295,6 +308,8 @@ class Server(object):
         monitor_port: int = None,
         transport: BrokerTransport | None = None,
         monitor: MonitorPort | None = None,
+        threaded: bool = False,
+        worker_transport_factory: Callable[[], WorkerTransport] | None = None,
     ):
         """
         :param service_factory: A Service class, Service.factory(), or ServiceFactory
@@ -303,6 +318,8 @@ class Server(object):
         :param monitor_port: alternate way to specify a monitor port
         :param transport: Optional BrokerTransport adapter; defaults to ZmqBrokerTransport
         :param monitor: Optional MonitorPort adapter; defaults to NullMonitor unless monitor_port is set
+        :param threaded: If True, run workers in-process in daemon threads instead of multiprocessing.Process
+        :param worker_transport_factory: Optional factory for WorkerTransport when threaded=True
         """
         self.service_type, _ = _resolve_service(service_factory)
         self.service_factory = service_factory
@@ -310,7 +327,14 @@ class Server(object):
         self.backend_addr = f'tcp://*:{ports[1]}'
         self.transport = transport
         self._stop_event = Event()
-        self.manager = WorkerManager(self.service_factory, self.backend_addr, instances=instances)
+        self._broker_thread: Thread | None = None
+        self.manager = WorkerManager(
+            self.service_factory,
+            self.backend_addr,
+            instances=instances,
+            threaded=threaded,
+            worker_transport_factory=worker_transport_factory,
+        )
         self.monitor: MonitorPort = NullMonitor()
 
         if monitor is not None:
@@ -329,10 +353,30 @@ class Server(object):
         elif monitor_port:
             logger.warning('Dashboard not enabled. Please run "pip install szrpc[dash] to enable it"')
 
+    def start(
+        self,
+        balancing: bool = False,
+        proxy: Literal['simple', 'balancing', 'round-robin'] = 'round-robin',
+    ) -> Thread:
+        """Start the broker loop in a background daemon thread and return it."""
+        self._broker_thread = Thread(
+            target=self.run,
+            kwargs={'balancing': balancing, 'proxy': proxy},
+            daemon=True,
+        )
+        self._broker_thread.start()
+        return self._broker_thread
+
     def stop(self) -> None:
-        """Signal the broker loop to stop and terminate managed worker processes."""
+        """Signal the broker loop to stop and terminate managed workers."""
         self._stop_event.set()
         self.manager.stop_workers()
+        if (
+            self._broker_thread is not None
+            and self._broker_thread is not current_thread()
+            and self._broker_thread.is_alive()
+        ):
+            self._broker_thread.join(timeout=1.0)
 
     def close(self) -> None:
         """Alias for stop()."""
@@ -529,37 +573,74 @@ class Server(object):
 
 
 class WorkerManager(object):
-    def __init__(self, factory: ServiceFactory, address: str, instances: int = 1, methods: Sequence[str] = ()):
+    def __init__(
+        self,
+        factory,
+        address: str,
+        instances: int = 1,
+        methods: Sequence[str] = (),
+        threaded: bool = False,
+        worker_transport_factory: Callable[[], WorkerTransport] | None = None,
+    ):
         """
-        :param factory:  A ServiceFactory instance
+        :param factory: Service class, Service.factory(), or ServiceFactory
         :param address: Backend address to connect to
         :param instances: Number of worker instances to manage
         :param methods: List of allowed methods to run
+        :param threaded: Run workers in-process in threads instead of multiprocessing.Process
+        :param worker_transport_factory: Optional factory for WorkerTransport when threaded=True
         """
         self.factory = factory
         self.backend_addr = address.replace('*', 'localhost')
         self.instances = instances
         self.methods = methods
-        self.processes = []
+        self.threaded = threaded
+        self.worker_transport_factory = worker_transport_factory
+        self.processes: list[Process] = []
+        self._workers: list[Worker] = []
+        self._threads: list[Thread] = []
 
     def start_workers(self):
-        """
-        Start subprocesses for each worker
-        :return:
-        """
-
+        """Start subprocesses or in-process threads for each worker."""
         self.processes = []
-        for i in range(self.instances):
-            p = Process(target=start_worker, args=(self.backend_addr, self.factory, self.methods))
-            p.start()
-            self.processes.append(p)
+        self._workers = []
+        self._threads = []
+        _, make_service = _resolve_service(self.factory)
+
+        for _ in range(self.instances):
+            if self.threaded:
+                transport = self.worker_transport_factory() if self.worker_transport_factory else None
+                worker = Worker(
+                    self.backend_addr,
+                    make_service(),
+                    methods=self.methods,
+                    transport=transport,
+                )
+                t = Thread(target=worker.run, daemon=True)
+                t.start()
+                self._workers.append(worker)
+                self._threads.append(t)
+            else:
+                p = Process(target=start_worker, args=(self.backend_addr, self.factory, self.methods))
+                p.start()
+                self.processes.append(p)
         if self.instances:
-            logger.info(f'Connected {self.instances} worker(s) to {self.backend_addr}')
+            mode = 'threaded' if self.threaded else 'process'
+            logger.info(f'Connected {self.instances} {mode} worker(s) to {self.backend_addr}')
             _method_txt = ','.join(self.methods) if self.methods else 'All'
             logger.info(f'Supported methods: {_method_txt}')
 
     def stop_workers(self):
-        """Terminate any running worker subprocesses."""
+        """Stop any running worker threads and terminate worker subprocesses."""
+        for worker in self._workers:
+            worker.stop()
+        caller = current_thread()
+        for t in self._threads:
+            if t is not caller and t.is_alive():
+                t.join(timeout=1.0)
+        self._workers = []
+        self._threads = []
+
         for proc in self.processes:
             if proc.is_alive():
                 proc.terminate()
@@ -567,11 +648,11 @@ class WorkerManager(object):
         self.processes = []
 
     def wait_for_workers(self):
-        """
-        Wait for all worker processes to terminate
-        """
+        """Wait for all worker processes and threads to terminate."""
         for proc in self.processes:
             proc.join()
+        for t in self._threads:
+            t.join()
 
     def run(self):
         self.start_workers()

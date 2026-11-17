@@ -66,3 +66,39 @@ def test_service_factory_partial_and_legacy_alias():
     legacy = ServiceFactory(ScaledService, scale=5)
     assert legacy.get_methods() == ScaledService.get_methods()
     assert legacy.new().scale == 5
+
+
+class LifecycleService(Service):
+    def __init__(self, events: list[str]):
+        super().__init__()
+        self.events = events
+
+    def on_start(self) -> None:
+        self.events.append('start')
+
+    def on_shutdown(self) -> None:
+        self.events.append('shutdown')
+
+    def remote__ping_data(self, request):
+        self.events.append('call')
+        return 'pong'
+
+
+def test_service_lifecycle_hooks():
+    net = InMemoryNetwork()
+    events: list[str] = []
+
+    with Server(
+        LifecycleService.factory(events),
+        instances=1,
+        threaded=True,
+        transport=net.broker(),
+        worker_transport_factory=net.worker,
+    ) as server:
+        server.start()
+        with Client(transport=net.client(b'c-1')) as client:
+            res = client.ping_data()
+            assert res.wait(timeout=2)
+            assert res.results == 'pong'
+
+    assert events == ['start', 'call', 'shutdown']
