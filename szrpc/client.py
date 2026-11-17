@@ -10,56 +10,16 @@ from threading import Event, Lock, Thread, current_thread
 
 from . import log
 from .protocol import Request
-from .result import Result
+from .result import DirectDispatcher, Dispatcher, Result
 from .transport import ClientTransport, ZmqClientTransport
 
 logger = log.get_module_logger('szrpc')
 
 
-class ResultManager:
-    def __init__(self):
-        self.data = {}
-        self.lock = Lock()
-
-    def add(self, result: Result):
-        with self.lock:
-            self.data[result.result_id] = result
-
-    def get(self, result_id: bytes) -> Result | None:
-        with self.lock:
-            return self.data.get(result_id)
-
-    def remove(self, result_id: bytes):
-        with self.lock:
-            del self.data[result_id]
-
-    def process(self, response):
-        result = self.get(response.request_id)
-        if result is not None:
-            result.process(response)
-
-            if result.is_ready():
-                self.remove(response.request_id)
-
-
-def load_class(dotted_path: str) -> type:
-    """
-    Dynamically loads a class from a dotted path string.
-    e.g., "my_package.my_module.MyClass"
-    
-    """
-    parts = dotted_path.rsplit('.', 1)
-    try:
-        module_name, class_name = parts
-        module = importlib.import_module(module_name)
-        class_object = getattr(module, class_name)
-        return class_object
-    except IndexError as e:
-        raise IndexError(f"Invalid dotted path: {dotted_path}: {e}")
-    except ImportError as e:
-        raise ImportError(f"Could not import module {parts[0]}: {e}")
-    except AttributeError as e:
-        raise AttributeError(f"Could not find class {parts[1]} in module {parts[0]}: {e}")
+_LEGACY_DISPATCHERS = {
+    'szrpc.result.gresult.GResult': ('szrpc.result.gresult', 'GLibDispatcher'),
+    'szrpc.result.qresult.QResult': ('szrpc.result.qresult', 'QtDispatcher'),
+}
 
 
 class Client(object):
@@ -67,7 +27,7 @@ class Client(object):
     Base class for all clients.
     """
 
-    RESULT_CLASS = Result
+    DEFAULT_DISPATCHER: Dispatcher | None = None
 
     def __init__(
         self,
@@ -77,6 +37,7 @@ class Client(object):
         client_id: str | None = None,
         linger: bool = True,
         transport: ClientTransport | None = None,
+        dispatcher: Dispatcher | None = None,
     ):
         """
         :param address: Server address for the client, For example: tcp://localhost:9990
@@ -87,6 +48,7 @@ class Client(object):
         simultaneously connected clients. use the Client.create_id() class method to generate compatible unique ids.
         :param linger: if True, keep unsent messages in the queue on exit
         :param transport: Optional ClientTransport adapter; defaults to ZmqClientTransport
+        :param dispatcher: Optional Dispatcher adapter for Result signal callbacks
         """
         if transport is not None:
             self.client_id = transport.client_id
@@ -100,7 +62,9 @@ class Client(object):
         self.requests = Queue()
         self.responses = Queue()
         self.remote_methods = set(methods)
-        self.results = ResultManager()
+        self.dispatcher: Dispatcher = dispatcher or self.DEFAULT_DISPATCHER or DirectDispatcher()
+        self._results: dict[bytes, Result] = {}
+        self._results_lock = Lock()
         self.ready = False
         self.linger = linger
         self.starting = True
@@ -120,16 +84,24 @@ class Client(object):
         return f'{host}-{client}'.encode('ascii')
 
     @classmethod
-    def use(cls, result_class: type | str):
+    def use(cls, target: Dispatcher | type | str):
         """
-        Swap out the Result Class. Used for integration with different main-loops like
-        Gtk, Qt or other bespoke main loops.
+        Configure the default signal Dispatcher for Clients.
 
-        :param result_class: Class object or dotted path string
+        Accepts a Dispatcher instance/class or legacy GResult/QResult dotted paths.
         """
-        if isinstance(result_class, str):
-            result_class = load_class(result_class)
-        cls.RESULT_CLASS = result_class
+        if isinstance(target, str):
+            if target in _LEGACY_DISPATCHERS:
+                mod_name, attr_name = _LEGACY_DISPATCHERS[target]
+            else:
+                mod_name, attr_name = target.rsplit('.', 1)
+            mod = importlib.import_module(mod_name)
+            obj = getattr(mod, attr_name)
+            cls.DEFAULT_DISPATCHER = obj() if isinstance(obj, type) else obj
+        elif isinstance(target, type):
+            cls.DEFAULT_DISPATCHER = target()
+        else:
+            cls.DEFAULT_DISPATCHER = target
 
     def get_id(self) -> bytes:
         """
@@ -209,9 +181,10 @@ class Client(object):
         kwargs = {} if kwargs is None else kwargs
         request = Request(self.client_id, request_id, method, kwargs)
         logger.debug(f'~> {request}')
+        result = Result(request_id, dispatcher=self.dispatcher)
+        with self._results_lock:
+            self._results[request_id] = result
         self.requests.put(request)
-        result = self.RESULT_CLASS(request_id)
-        self.results.add(result)
         return result
 
     def send_requests(self):
@@ -257,7 +230,13 @@ class Client(object):
 
             if response is not None:
                 logger.debug(f'<~ {response}')
-                self.results.process(response)
+                with self._results_lock:
+                    result = self._results.get(response.request_id)
+                if result is not None:
+                    result.process(response)
+                    if result.is_ready():
+                        with self._results_lock:
+                            self._results.pop(response.request_id, None)
 
             # check connection
             if self.heartbeat > 0:

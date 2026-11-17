@@ -1,30 +1,22 @@
-from . import ResultMixin
+from __future__ import annotations
+
+from typing import Callable
+
 from PySide6.QtCore import QObject, Signal
 
 
-class QResult(ResultMixin, QObject):
+class QtDispatcher(QObject):
+    """Dispatcher adapter that marshals Result callbacks onto the Qt main thread."""
 
-    done = Signal(object, object, name='done')
-    update = Signal(object, object, name='update')
-    failed = Signal(object, str, name='failed')
+    _invoked = Signal(object)
 
-    def __init__(self, result_id: bytes):
-        super().__init__()
-        self.setup(result_id)
-        self.__sig_map = {
-            'done': self.done,
-            'update': self.update,
-            'failed': self.failed
-        }
+    def __init__(self, parent: QObject | None = None):
+        super().__init__(parent)
+        self._invoked.connect(self._run)
 
-    def connect(self, signal, slot, *args, **kwargs):
-        return self.__sig_map[signal].connect(slot)
+    @staticmethod
+    def _run(fn: Callable[[], None]) -> None:
+        fn()
 
-    def disconnect(self, signal, slot):
-        self.__sig_map[signal].disconnect(slot)
-
-    def trigger(self, signal, *args):
-        self.__sig_map[signal].emit(self, *args)
-
-    def post_process(self):
-        pass
+    def dispatch(self, fn: Callable[[], None]) -> None:
+        self._invoked.emit(fn)
