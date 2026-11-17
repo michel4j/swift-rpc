@@ -2,8 +2,8 @@
 name = "szrpc"
 dynamic = ["version"]
 description = " Simple ZeroMQ RPC in Python"
-readme = "README.rst"
-readme-content-type = "text/x-rst"
+readme = "README.md"
+readme-content-type = "text/markdown"
 license = "MIT"
 authors = [
     {name = "Michel Fodje",email = "michel.fodje@lightsource.ca"}
