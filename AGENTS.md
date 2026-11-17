@@ -11,3 +11,7 @@ Uses default triage labels (`needs-triage`, `needs-info`, `ready-for-agent`, `re
 ### Domain docs
 
 Single-context layout (`GLOSSARY.md` and `docs/adr/` at repo root). See `docs/agents/domain.md`.
+
+### Commands
+- Run the full test suite: `uv run pytest`
+- Run a specific test: `uv run pytest tests/test_service.py`
