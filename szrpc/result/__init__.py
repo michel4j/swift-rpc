@@ -31,6 +31,7 @@ class Result:
         'ready_state',
         'failed_state',
         'errors',
+        'error_info',
         '_event',
         '_slots',
         '_next_token',
@@ -44,6 +45,7 @@ class Result:
         self.parts: list[Any] = []
         self.results: Any = None
         self.errors: str = ''
+        self.error_info: dict[str, Any] | None = None
         self.ready_state = False
         self.failed_state = False
         self._event = Event()
@@ -100,7 +102,14 @@ class Result:
             self._event.set()
             self.trigger('done', info)
         elif response.type == ResponseType.ERROR:
-            self.errors = response.content
+            if isinstance(response.content, dict):
+                self.error_info = response.content
+                err_type = response.content.get('type')
+                msg = response.content.get('message', '')
+                self.errors = f'{err_type}: {msg}' if err_type else str(msg)
+            else:
+                self.error_info = {'type': None, 'message': str(response.content), 'code': None}
+                self.errors = str(response.content)
             self.failed_state = True
             self.ready_state = True
             self._event.set()

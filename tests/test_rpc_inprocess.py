@@ -7,6 +7,10 @@ from szrpc.server import Server, Service, ServiceFactory, Worker
 from szrpc.transport import InMemoryNetwork
 
 
+class BusyError(RuntimeError):
+    code = 'RESOURCE_BUSY'
+
+
 class MathService(Service):
     def remote__add(self, request, x=0, y=0):
         return x + y
@@ -18,6 +22,9 @@ class MathService(Service):
 
     def remote__fail(self, request):
         raise ValueError('boom')
+
+    def remote__busy(self, request):
+        raise BusyError('motor moving')
 
     def remote__only_a(self, request):
         return 'from-a'
@@ -57,6 +64,16 @@ def test_client_server_worker_roundtrip(proxy_mode):
                 assert err_res.wait(timeout=2)
                 assert err_res.failed_state
                 assert 'boom' in err_res.errors
+                assert err_res.error_info == {'type': 'ValueError', 'message': 'boom', 'code': None}
+
+                busy_res = client.busy()
+                assert busy_res.wait(timeout=2)
+                assert busy_res.failed_state
+                assert busy_res.error_info == {
+                    'type': 'BusyError',
+                    'message': 'motor moving',
+                    'code': 'RESOURCE_BUSY',
+                }
 
         worker_t.join(timeout=1)
     server_t.join(timeout=1)

@@ -75,6 +75,10 @@ class Request:
             self.reply_to.put(response)
         return response
 
+    def ready(self) -> 'Response':
+        """Signal to the broker that the worker is ready for additional requests while this one streams."""
+        return self.reply(None, ResponseType.READY)
+
     def __str__(self) -> str:
         req_id = '/'.join(self.request_id.decode('ascii').split('/')[-2:])
         call_signature = log.log_call(self.method, (), self.kwargs, simple=True)

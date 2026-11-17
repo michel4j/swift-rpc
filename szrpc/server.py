@@ -7,6 +7,7 @@ import sys
 import time
 import queue
 import socket
+from collections import deque
 
 from typing import Any, Callable, Protocol, Type, Literal, Sequence
 from threading import Event, Thread, current_thread
@@ -34,6 +35,12 @@ logger = log.get_module_logger(__name__)
 SERVER_TIMEOUT = 4
 MIN_HEARTBEAT_INTERVAL = 1
 MAX_HEARTBEAT_INTERVAL = 2
+
+
+def control(fn: Callable) -> Callable:
+    """Mark a Service remote__* method as a control RPC that bypasses load-balancing busy gates."""
+    fn._szrpc_control = True
+    return fn
 
 
 class Service(object):
@@ -70,6 +77,15 @@ class Service(object):
         )
 
     @classmethod
+    def get_control_methods(cls) -> set[str]:
+        """Return remote method names decorated with @control."""
+        return {
+            attr[len('remote__'):]
+            for attr in dir(cls)
+            if attr.startswith('remote__') and getattr(getattr(cls, attr, None), '_szrpc_control', False)
+        }
+
+    @classmethod
     def factory(cls, *args, **kwargs) -> functools.partial:
         """Bind constructor arguments for deferred worker instantiation."""
         return functools.partial(cls, *args, **kwargs)
@@ -102,9 +118,10 @@ class Service(object):
         try:
             method = getattr(self, f'remote__{request.method}')
         except AttributeError:
-            logger.error(f'Service does not support remote method "{request.method}"')
+            msg = f'Service does not support remote method "{request.method}"'
+            logger.error(msg)
             request.reply(
-                content=f'Service does not support remote method "{request.method}"',
+                content={'type': 'AttributeError', 'message': msg, 'code': 'METHOD_NOT_FOUND'},
                 response_type=ResponseType.ERROR,
             )
         else:
@@ -112,7 +129,11 @@ class Service(object):
                 reply = method(request, **request.kwargs)
                 response_type = ResponseType.DONE
             except Exception as e:
-                reply = f'Error: {e}'
+                reply = {
+                    'type': type(e).__name__,
+                    'message': str(e),
+                    'code': getattr(e, 'code', None),
+                }
                 logger.exception(e)
                 response_type = ResponseType.ERROR
             request.reply(content=reply, response_type=response_type)
@@ -425,7 +446,7 @@ class Server(object):
         return ctx, frontend, backend
 
     def _process_response(self, worker: bytes, response: Response, transport: BrokerTransport):
-        if response.type != ResponseType.HEARTBEAT:
+        if response.type not in (ResponseType.HEARTBEAT, ResponseType.READY):
             transport.send_to_client(response)
             self.monitor.record_response(
                 worker.decode('utf-8'),
@@ -495,11 +516,14 @@ class Server(object):
         worker_times: dict[bytes, float] = {}
         worker_methods: dict[bytes, set[str]] = {}
         worker_queue: list[bytes] = []
+        control_methods = self.service_type.get_control_methods()
+        pending_requests: deque[Request] = deque()
 
         try:
             while not self._stop_event.is_set():
+                accept_clients = bool(worker_queue) or (bool(control_methods) and bool(worker_times))
                 backend_replies, frontend_requests = transport.poll(
-                    10, accept_clients=bool(worker_queue)
+                    10, accept_clients=accept_clients
                 )
 
                 for worker, response in backend_replies:
@@ -515,7 +539,7 @@ class Server(object):
                         worker_methods[worker] = w_methods
                     elif (
                         strategy == 'balancing'
-                        and response.type in (ResponseType.DONE, ResponseType.ERROR)
+                        and response.type in (ResponseType.DONE, ResponseType.ERROR, ResponseType.READY)
                         and worker not in worker_queue
                     ):
                         worker_queue.append(worker)
@@ -536,24 +560,40 @@ class Server(object):
                     logger.warning(f'Workers [{len(worker_times):4d}], - : {removed_workers}')
                     self._monitor_cleanup(removed)
 
-                for request in frontend_requests:
+                pending_requests.extend(frontend_requests)
+                deferred: deque[Request] = deque()
+
+                while pending_requests:
+                    request = pending_requests.popleft()
                     if request.method in ('client_config', 'ping'):
                         content = '' if request.method == 'ping' else self.service_type.get_methods()
                         transport.send_to_client(request.reply(content, ResponseType.DONE))
                         continue
 
-                    worker = self._select_worker(request.method, worker_queue, worker_methods)
-                    if worker is None:
+                    if not worker_times:
                         transport.send_to_client(
-                            request.reply('No workers available', ResponseType.ERROR)
+                            request.reply(
+                                {'type': 'RuntimeError', 'message': 'No workers available', 'code': 'NO_WORKERS'},
+                                ResponseType.ERROR,
+                            )
                         )
                         continue
 
-                    if strategy == 'round-robin':
-                        worker_queue.append(worker)
+                    if request.method in control_methods and not worker_queue:
+                        live_pool = list(worker_times.keys())
+                        worker = self._select_worker(request.method, live_pool, worker_methods)
+                    else:
+                        worker = self._select_worker(request.method, worker_queue, worker_methods)
+                        if worker is None:
+                            deferred.append(request)
+                            continue
+                        if strategy == 'round-robin':
+                            worker_queue.append(worker)
 
                     transport.send_to_worker(worker, request)
                     self._monitor_request(worker, request)
+
+                pending_requests = deferred
         finally:
             transport.close()
 

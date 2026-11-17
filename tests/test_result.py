@@ -54,6 +54,15 @@ def test_result_wait_and_error():
     assert res.wait(timeout=0.1)
     assert res.failed_state
     assert res.errors == 'bad input'
+    assert res.error_info == {'type': None, 'message': 'bad input', 'code': None}
+
+    res2 = Result(b'req-3')
+    res2.process(
+        Response(b'c1', b'req-3', ResponseType.ERROR, {'type': 'BusyError', 'message': 'locked', 'code': 409})
+    )
+    assert res2.failed_state
+    assert res2.errors == 'BusyError: locked'
+    assert res2.error_info == {'type': 'BusyError', 'message': 'locked', 'code': 409}
 
 
 def test_client_dispatcher_seam():
