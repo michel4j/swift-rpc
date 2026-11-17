@@ -1,11 +1,11 @@
-from datetime import datetime, timedelta
+from datetime import datetime
 import socket
 import sys
 import threading
 import time
 from collections import deque
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional, Sequence
 
 import uvicorn
 from fastapi import FastAPI
@@ -16,22 +16,6 @@ from . import log
 logger = log.get_module_logger("server")
 
 MAX_HISTORY_RECORDS = 500
-
-
-def human_bytes(size: int) -> str:
-    """
-    Format byte size in human-readable form
-    :param size: integer number of bytes
-    :return: string representation of size
-    """
-    units = ('K', 'M', 'G', 'T', 'P', 'E', 'Z', 'Y')
-    if size < 1000:
-        return f"{size}"
-    for i, unit in enumerate(units):
-        size /= 1024.0
-        if size < 1000:
-            return f"{size:.1f}{unit}"
-    return f"{size:.1f} {units[-1]}"
 
 
 class CallRecord:
@@ -123,28 +107,31 @@ class Monitor:
         with self.lock:
             self.workers[worker_id] = time.time()
 
-    def clear_workers(self, workers):
+    def clear_workers(self, workers: Sequence[str]):
         """
-        Remove all active tasks associated with removed workers (e.g. when they disconnect)
-        :param workers: removed workers
+        Remove all active tasks associated with removed workers (e.g. when they disconnect).
+        :param workers: sequence of removed worker IDs (decoded str)
         """
+        worker_set = set(workers)
         with self.lock:
-            to_remove = []
-            for record_id, record in self.active_calls.items():
-                worker_id = record.worker_id.encode('utf-8')
-                if worker_id in workers:
-                    to_remove.append(record_id)
+            for wid in worker_set:
+                self.workers.pop(wid, None)
+
+            to_remove = [
+                record_id
+                for record_id, record in self.active_calls.items()
+                if record.worker_id in worker_set
+            ]
 
             for record_id in to_remove:
-                if record_id not in self.active_calls:
+                record = self.active_calls.pop(record_id, None)
+                if record is None:
                     continue
-                record = self.active_calls.pop(record_id)
                 record.end_time = time.time()
                 record.duration = record.end_time - record.start_time
                 record.result.append('Worker lost connection')
                 record.status = 'ERROR'
                 self.stats["total_errors"] += 1
-                to_remove.append(record_id)
                 self.historical_calls.append(record)
 
     def get_data(self) -> Dict[str, Any]:
@@ -178,36 +165,31 @@ class Monitor:
             return None
 
 
-app = FastAPI(title="Swift RPC Introspection")
-monitor_instance: Optional[Monitor] = None
+def create_app(monitor: Monitor) -> FastAPI:
+    """Build a FastAPI dashboard app bound to a specific Monitor instance."""
+    app = FastAPI(title="Swift RPC Introspection")
 
+    @app.get("/api/data")
+    async def get_data():
+        return monitor.get_data()
 
-@app.get("/api/data")
-async def get_data():
-    if monitor_instance:
-        return monitor_instance.get_data()
-    return {"error": "Monitor not initialized"}
-
-
-@app.get("/api/details/{request_id}")
-async def get_details(request_id: str):
-    if monitor_instance:
-        details = monitor_instance.get_call_details(request_id)
+    @app.get("/api/details/{request_id}")
+    async def get_details(request_id: str):
+        details = monitor.get_call_details(request_id)
         if details:
             return details
-    return {"error": "Request not found"}
+        return {"error": "Request not found"}
 
+    @app.get("/")
+    async def index():
+        return FileResponse(Path(__file__).parent / "data" / "monitor.html")
 
-@app.get("/")
-async def index():
-    return FileResponse(Path(__file__).parent / "data" / "monitor.html")
+    return app
 
 
 def run_introspection_server(monitor: Monitor, host: str = "0.0.0.0", port: int = 8080):
-    global monitor_instance
-    monitor_instance = monitor
     logger.info(f"Starting dashboard at {host}:{port}")
-    uvicorn.run(app, host=host, port=port, log_level="warning")
+    uvicorn.run(create_app(monitor), host=host, port=port, log_level="warning")
 
 
 def start_monitor_thread(monitor: Monitor, port: int = 8080) -> threading.Thread:

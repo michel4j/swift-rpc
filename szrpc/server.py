@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import re
 import os
 import sys
@@ -7,7 +8,7 @@ import time
 import queue
 import socket
 
-from typing import Type, Literal, Sequence
+from typing import Any, Callable, Protocol, Type, Literal, Sequence
 from threading import Event, Thread
 from multiprocessing import Process
 
@@ -52,11 +53,26 @@ class Service(object):
     PING_PACKET = b''
 
     def __init__(self, *args, **kwargs):
-        self.allowed_methods = tuple(
-            re.sub('^remote__', '', attr)
-            for attr in dir(self) if attr.startswith('remote__')
-        )
+        self.allowed_methods = self.get_methods()
         self.name_generator = namer.RandomGenerator()
+
+    @classmethod
+    def get_description(cls) -> str:
+        """Get a description of the service type from the class name and docstring."""
+        return cls.__str__()
+
+    @classmethod
+    def get_methods(cls) -> tuple[str, ...]:
+        """Single source of truth for allowed remote__* method names on this Service."""
+        return tuple(
+            attr[len('remote__'):]
+            for attr in dir(cls) if attr.startswith('remote__')
+        )
+
+    @classmethod
+    def factory(cls, *args, **kwargs) -> functools.partial:
+        """Bind constructor arguments for deferred worker instantiation."""
+        return functools.partial(cls, *args, **kwargs)
 
     @classmethod
     def __str__(cls):
@@ -115,44 +131,30 @@ class Service(object):
 
 
 class ServiceFactory(object):
-    """
-    A Factory which takes a service type class and arguments for instantiating it, and then creates
-    new instances as needed.
-    """
+    """Deprecated compatibility wrapper; prefer passing a Service class or Service.factory(...) directly."""
 
     def __init__(self, service_type: Type[Service], *args, **kwargs):
-        """
-        :param service_type: Service class
-        :param args: positional arguments for Service
-        :param kwargs: Keyword arguments for Service
-        """
         self.service_type = service_type
         self.args = args
         self.kwargs = kwargs
 
     def get_description(self) -> str:
-        """
-        Get a description of the service type from the class name and the docstring
-        :return: description string
-        """
-        return self.service_type.__str__()
+        return self.service_type.get_description()
 
     def get_methods(self) -> tuple:
-        """
-        Get a list of allowed remote methods for the service type
-        :return: list of method names
-        """
-        return tuple({
-            re.sub('^remote__', '', attr)
-            for attr in dir(self.service_type) if attr.startswith('remote__')
-        } | {'client_config'})
+        return self.service_type.get_methods()
 
-    def new(self):
-        """
-        Create a new Service instance
-        :return: Service object
-        """
+    def new(self) -> Service:
         return self.service_type(*self.args, **self.kwargs)
+
+
+def _resolve_service(target) -> tuple[Type[Service], Callable[[], Service]]:
+    """Normalize a Service class, Service.factory() partial, or legacy ServiceFactory."""
+    if isinstance(target, functools.partial):
+        return target.func, target
+    if isinstance(target, type) and issubclass(target, Service):
+        return target, target
+    return target.service_type, target.new
 
 
 class Worker(object):
@@ -245,51 +247,82 @@ class Worker(object):
             transport.close()
 
 
-def start_worker(address: str, factory: ServiceFactory, methods: Sequence[str] = (), *args, **kwargs):
+def start_worker(address: str, factory, methods: Sequence[str] = (), *args, **kwargs):
     """
     Start a single worker in a subprocess
     :param address: backend address
-    :param factory: Service Factory
+    :param factory: Service class, Service.factory(), or ServiceFactory
     :param methods: List of remote methods supported by this worker instance
     """
-    service = factory.new()
+    _, make_service = _resolve_service(factory)
+    service = make_service()
     worker = Worker(address, service, methods=methods, *args, **kwargs)
     logger.debug(f'Starting new worker process: {os.getpid()}')
     return worker.run()
 
 
+class MonitorPort(Protocol):
+    """Port for recording broker RPC lifecycle events."""
+
+    def record_request(self, worker_id: str, client_id: str, request_id: str, method: str, kwargs: dict[str, Any]) -> None: ...
+    def record_response(self, worker_id: str, request_id: str, status: str, result: Any) -> None: ...
+    def update_worker(self, worker_id: str) -> None: ...
+    def clear_workers(self, workers: Sequence[str]) -> None: ...
+
+
+class NullMonitor:
+    """No-op MonitorPort adapter used when monitoring is disabled."""
+
+    def record_request(self, worker_id: str, client_id: str, request_id: str, method: str, kwargs: dict[str, Any]) -> None:
+        pass
+
+    def record_response(self, worker_id: str, request_id: str, status: str, result: Any) -> None:
+        pass
+
+    def update_worker(self, worker_id: str) -> None:
+        pass
+
+    def clear_workers(self, workers: Sequence[str]) -> None:
+        pass
+
+
 class Server(object):
     def __init__(
         self,
-        service_factory: ServiceFactory,
+        service_factory,
         ports: tuple = (9990, 9991),
         instances: int = 1,
         monitor_port: int = None,
         transport: BrokerTransport | None = None,
+        monitor: MonitorPort | None = None,
     ):
         """
-        :param service_factory: A Service factory which creates service instances
+        :param service_factory: A Service class, Service.factory(), or ServiceFactory
         :param ports: a tuple of ports for frontend, backend
         :param instances: Number of workers to start on server. Additional workers can be started on other hosts
         :param monitor_port: alternate way to specify a monitor port
         :param transport: Optional BrokerTransport adapter; defaults to ZmqBrokerTransport
+        :param monitor: Optional MonitorPort adapter; defaults to NullMonitor unless monitor_port is set
         """
+        self.service_type, _ = _resolve_service(service_factory)
         self.service_factory = service_factory
         self.frontend_addr = f'tcp://*:{ports[0]}'
         self.backend_addr = f'tcp://*:{ports[1]}'
         self.transport = transport
         self._stop_event = Event()
         self.manager = WorkerManager(self.service_factory, self.backend_addr, instances=instances)
-        self.monitor = None
+        self.monitor: MonitorPort = NullMonitor()
 
-        if DASH_ENABLED and monitor_port:
+        if monitor is not None:
+            self.monitor = monitor
+        elif DASH_ENABLED and monitor_port:
             info = {
                 'host': socket.getfqdn().split('.')[0].upper(),
                 'version': f"v{__version__}",
                 'frontend': self.frontend_addr,
                 'backend': self.backend_addr,
-                'description': self.service_factory.get_description(),
-                'methods': self.service_factory.get_methods()
+                'description': self.service_type.get_description(),
+                'methods': self.service_type.get_methods()
             }
             self.monitor = mon.Monitor(service_info=info)
             mon.start_monitor_thread(self.monitor, port=monitor_port)
@@ -350,37 +383,34 @@ class Server(object):
     def _process_response(self, worker: bytes, response: Response, transport: BrokerTransport):
         if response.type != ResponseType.HEARTBEAT:
             transport.send_to_client(response)
-            if self.monitor:
-                self.monitor.record_response(
-                    worker.decode('utf-8'),
-                    response.identity,
-                    response.type.name,
-                    response.content
-                )
-        elif self.monitor:
+            self.monitor.record_response(
+                worker.decode('utf-8'),
+                response.identity,
+                response.type.name,
+                response.content,
+            )
+        else:
             self.monitor.update_worker(worker.decode('utf-8'))
 
     def _monitor_request(self, worker: bytes, request: Request):
-        if self.monitor:
-            try:
-                self.monitor.record_request(
-                    worker.decode('utf-8'),
-                    request.client_id.decode('utf-8'),
-                    request.identity,
-                    request.method,
-                    request.kwargs
-                )
-            except Exception as e:
-                logger.error(f"Failed to record request in monitor: {e}")
+        try:
+            self.monitor.record_request(
+                worker.decode('utf-8'),
+                request.client_id.decode('utf-8'),
+                request.identity,
+                request.method,
+                request.kwargs,
+            )
+        except Exception as e:
+            logger.error(f"Failed to record request in monitor: {e}")
 
     def _monitor_cleanup(self, workers):
         """
         Remove active jobs if their workers disappear. This is called when a worker is removed from the pool due to
         inactivity or failure.
-        :param workers: sequence of workers to remove from the monitor
+        :param workers: sequence of worker ID bytes to remove from the monitor
         """
-        if self.monitor:
-            self.monitor.clear_workers(workers)
+        self.monitor.clear_workers([w.decode('utf-8') for w in workers])
 
     def simple_proxy(self):
         """
@@ -464,7 +494,7 @@ class Server(object):
 
                 for request in frontend_requests:
                     if request.method in ('client_config', 'ping'):
-                        content = '' if request.method == 'ping' else self.service_factory.get_methods()
+                        content = '' if request.method == 'ping' else self.service_type.get_methods()
                         transport.send_to_client(request.reply(content, ResponseType.DONE))
                         continue
 
