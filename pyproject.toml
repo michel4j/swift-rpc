@@ -15,54 +15,42 @@ classifiers = [
   "License :: OSI Approved :: MIT License",
   "Operating System :: OS Independent",
 ]
+requires-python = ">=3.9,<4.0"
+dependencies = [
+    "msgpack",
+    "pyzmq",
+]
 
+[project.optional-dependencies]
+dash = ["fastapi", "uvcorn"]
+gtk = ["pygobject"]
+qt = ["pyside6"]
+dev = ["fastapi", "uvcorn", "pygobject", "pygobject-stubs", "pyside6", "pytest"]
 
 [project.urls]
 Homepage = "https://github.com/michel4j/swift-rpc"
 Issues = "https://github.com/michel4j/swift-rpc/issues"
 
+
 [build-system]
-requires = ["poetry-core>=2.0.0,<3.0.0", "poetry-dynamic-versioning>=1.0.0,<2.0.0"]
-build-backend = "poetry_dynamic_versioning.backend"
+requires = ["hatchling", "uv-dynamic-versioning"]
+build-backend = "hatchling.build"
 
-[tool.poetry]
-packages = [
-    { include = "szrpc", from = "." },
-]
-include = [
-    {path = "README.rst", format = ["sdist"]},
-]
-version = "0.0.0"
+[tool.uv]
+package = true
 
-[tool.poetry.dependencies]
-python = ">=3.9,<3.15"
-pyzmq = ">=27.1.0"
-msgpack = ">=1.1.0"
+[tool.hatch.version]
+source = "uv-dynamic-versioning"
 
-# optional dependencies
-fastapi = { version = ">=0.127.0,<0.140.0", optional = true }
-uvicorn = { version = ">=0.39.0,<0.51.0", optional = true }
-pygobject = { version = ">=3.54.5,<4.0.0", optional = true }
-pyside6 = { version = ">=6.10.3,<7.0.0", optional = true }
+[tool.hatch.build.targets.wheel]
+packages = ["szrpc"]
 
+[tool.uv-dynamic-versioning]
+vcs = "git"
+style = "pep440" # Options: "pep440", "semver", "pvp"
+fallback-version = "0.0.0" # Used if building outside a Git repo (e.g., from an sdist)
+format = "{base}.{revision}{distance}"
 
-[tool.poetry.extras]
-dash = ["fastapi", "uvicorn"]
-dev = ["pygobject", "pyside6"]
-qt = ["pyside6"]
-gtk = ["pygobject"]
-all = ["fastapi", "uvicorn", "pygobject", "pyside6"]
-
-[tool.poetry.group.dev.dependencies]
-pytest = ">=6.0"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-
-[tool.poetry.requires-plugins]
-poetry-dynamic-versioning = { version = ">=1.0.0,<2.0.0", extras = ["plugin"] }
-
-[tool.poetry-dynamic-versioning]
-enable = true
-vcs = "git"
-format = "{base}.{revision}{distance}"
