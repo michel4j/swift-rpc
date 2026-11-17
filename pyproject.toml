@@ -15,17 +15,17 @@ classifiers = [
   "License :: OSI Approved :: MIT License",
   "Operating System :: OS Independent",
 ]
-requires-python = ">=3.9,<4.0"
+requires-python = ">=3.9"
 dependencies = [
     "msgpack",
     "pyzmq",
 ]
 
 [project.optional-dependencies]
-dash = ["fastapi", "uvcorn"]
+dash = ["fastapi", "uvicorn"]
 gtk = ["pygobject"]
 qt = ["pyside6"]
-dev = ["fastapi", "uvcorn", "pygobject", "pygobject-stubs", "pyside6", "pytest"]
+dev = ["fastapi", "uvicorn", "pygobject", "pygobject-stubs", "pyside6", "pytest"]
 
 [project.urls]
 Homepage = "https://github.com/michel4j/swift-rpc"
