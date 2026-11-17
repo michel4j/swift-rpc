@@ -4,7 +4,7 @@ import queue
 import sys
 from enum import Enum
 from threading import Event, Lock
-from typing import Callable, Sequence
+from typing import Callable, Sequence, Any
 
 import msgpack
 
@@ -177,14 +177,23 @@ class Response:
         )
 
     @staticmethod
-    def heartbeat_message(system_id: bytes = b'', methods: Sequence[str] = ()) -> 'Response':
+    def heartbeat_message(
+        system_id: bytes = b'',
+        methods: Sequence[str] = (),
+        metrics: dict[str, Any] | None = None,
+    ) -> 'Response':
         """Create a HEARTBEAT Response object."""
-        return Response(system_id, b'heartbeat', ResponseType.HEARTBEAT, methods)
+        content: Any = methods if metrics is None else {'methods': list(methods), 'metrics': metrics}
+        return Response(system_id, b'heartbeat', ResponseType.HEARTBEAT, content)
 
     @staticmethod
-    def heartbeat(system_id: bytes = b'', methods: Sequence[str] = ()) -> list[bytes]:
+    def heartbeat(
+        system_id: bytes = b'',
+        methods: Sequence[str] = (),
+        metrics: dict[str, Any] | None = None,
+    ) -> list[bytes]:
         """Backwards-compatible helper returning encoded heartbeat frames."""
-        return Response.heartbeat_message(system_id=system_id, methods=methods).parts()
+        return Response.heartbeat_message(system_id=system_id, methods=methods, metrics=metrics).parts()
 
     def __str__(self) -> str:
         req_id = '-'.join(self.request_id.decode('ascii').split('-')[-2:])

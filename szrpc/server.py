@@ -8,6 +8,7 @@ import time
 import queue
 import socket
 from collections import defaultdict, deque
+from pathlib import Path
 
 from typing import Any, Callable, Protocol, Type, Literal, Sequence
 from threading import Event, Lock, Thread, current_thread
@@ -29,12 +30,68 @@ try:
 except ImportError:
     DASH_ENABLED = False
 
+try:
+    import psutil
+except ImportError:
+    psutil = None
+
 
 logger = log.get_module_logger(__name__)
 
 SERVER_TIMEOUT = 4
 MIN_HEARTBEAT_INTERVAL = 1
 MAX_HEARTBEAT_INTERVAL = 2
+
+
+def _parse_heartbeat_content(content: Any) -> tuple[set[str], dict[str, Any] | None]:
+    """Extract advertised methods and optional telemetry metrics from HEARTBEAT content."""
+    if isinstance(content, dict):
+        methods = content.get('methods', ())
+        metrics = content.get('metrics')
+        return set(methods), metrics if isinstance(metrics, dict) else None
+    try:
+        return set(content), None
+    except (ValueError, TypeError):
+        return set(), None
+
+
+class _WorkerMetricsSampler:
+    """Collects per-worker CPU, memory, and network I/O rates via psutil when available."""
+
+    def __init__(self):
+        self._proc = psutil.Process() if psutil is not None else None
+        self._last_ts = time.time()
+        self._last_net = psutil.net_io_counters() if psutil is not None else None
+        if self._proc is not None:
+            try:
+                self._proc.cpu_percent(interval=None)
+            except Exception:
+                self._proc = None
+
+    def sample(self, active_tasks: int) -> dict[str, Any]:
+        metrics: dict[str, Any] = {
+            'cpu_pct': 0.0,
+            'mem_rss': 0,
+            'net_rx_bps': 0.0,
+            'net_tx_bps': 0.0,
+            'active_tasks': active_tasks,
+        }
+        if self._proc is None:
+            return metrics
+        now = time.time()
+        dt = max(now - self._last_ts, 1e-3)
+        try:
+            metrics['cpu_pct'] = round(self._proc.cpu_percent(interval=None), 2)
+            metrics['mem_rss'] = int(self._proc.memory_info().rss)
+            net_io = psutil.net_io_counters()
+            if net_io is not None and self._last_net is not None:
+                metrics['net_rx_bps'] = round(max(0, net_io.bytes_recv - self._last_net.bytes_recv) / dt, 1)
+                metrics['net_tx_bps'] = round(max(0, net_io.bytes_sent - self._last_net.bytes_sent) / dt, 1)
+            self._last_net = net_io
+            self._last_ts = now
+        except Exception:
+            pass
+        return metrics
 
 
 def control(fn: Callable) -> Callable:
@@ -274,16 +331,16 @@ class Worker(object):
 
         try:
             self.service.on_start()
+            sampler = _WorkerMetricsSampler()
             # initial heartbeat message
-            transport.send(Response.heartbeat_message(methods=self.methods))
-            last_message = time.time()
+            transport.send(Response.heartbeat_message(methods=self.methods, metrics=sampler.sample(0)))
+            last_heartbeat = time.time()
 
             while not self._stop_event.is_set():
                 while not self.replies.empty():
                     response = self.replies.get()
                     logger.debug(f'-> {response}')
                     transport.send(response)
-                    last_message = time.time()
 
                 request = transport.recv(10)
                 if request is not None:
@@ -304,10 +361,14 @@ class Worker(object):
                     task = Thread(target=_dispatch, args=(request,), daemon=True)
                     task.start()
 
-                # Send a heartbeat every so often when idle
-                if time.time() - last_message > MIN_HEARTBEAT_INTERVAL:
-                    transport.send(Response.heartbeat_message(methods=self.methods))
-                    last_message = time.time()
+                # Send periodic heartbeat + telemetry even when busy
+                if time.time() - last_heartbeat >= MIN_HEARTBEAT_INTERVAL:
+                    with active_lock:
+                        n_active = len(active_requests)
+                    transport.send(
+                        Response.heartbeat_message(methods=self.methods, metrics=sampler.sample(n_active))
+                    )
+                    last_heartbeat = time.time()
         finally:
             try:
                 self.service.on_shutdown()
@@ -336,7 +397,7 @@ class MonitorPort(Protocol):
 
     def record_request(self, worker_id: str, client_id: str, request_id: str, method: str, kwargs: dict[str, Any]) -> None: ...
     def record_response(self, worker_id: str, request_id: str, status: str, result: Any) -> None: ...
-    def update_worker(self, worker_id: str) -> None: ...
+    def update_worker(self, worker_id: str, metrics: dict[str, Any] | None = None) -> None: ...
     def clear_workers(self, workers: Sequence[str]) -> None: ...
 
 
@@ -349,7 +410,7 @@ class NullMonitor:
     def record_response(self, worker_id: str, request_id: str, status: str, result: Any) -> None:
         pass
 
-    def update_worker(self, worker_id: str) -> None:
+    def update_worker(self, worker_id: str, metrics: dict[str, Any] | None = None) -> None:
         pass
 
     def clear_workers(self, workers: Sequence[str]) -> None:
@@ -363,6 +424,7 @@ class Server(object):
         ports: tuple = (9990, 9991),
         instances: int = 1,
         monitor_port: int = None,
+        monitor_db: str | Path | None = None,
         transport: BrokerTransport | None = None,
         monitor: MonitorPort | None = None,
         threaded: bool = False,
@@ -413,7 +475,7 @@ class Server(object):
                 'description': self.service_type.get_description(),
                 'methods': self.service_type.get_methods()
             }
-            self.monitor = mon.Monitor(service_info=info)
+            self.monitor = mon.Monitor(service_info=info, db_path=monitor_db or mon.default_db_path())
             mon.start_monitor_thread(self.monitor, port=monitor_port)
         elif monitor_port:
             logger.warning('Dashboard not enabled. Please run "pip install szrpc[dash] to enable it"')
@@ -442,6 +504,8 @@ class Server(object):
             and self._broker_thread.is_alive()
         ):
             self._broker_thread.join(timeout=1.0)
+        if hasattr(self.monitor, 'close'):
+            self.monitor.close()
 
     def close(self) -> None:
         """Alias for stop()."""
@@ -499,7 +563,10 @@ class Server(object):
                 response.content,
             )
         else:
-            self.monitor.update_worker(worker.decode('utf-8'))
+            metrics = None
+            if response.type == ResponseType.HEARTBEAT:
+                _, metrics = _parse_heartbeat_content(response.content)
+            self.monitor.update_worker(worker.decode('utf-8'), metrics=metrics)
 
     def _monitor_request(self, worker: bytes, request: Request):
         try:
@@ -588,10 +655,7 @@ class Server(object):
                         active_client_requests.get(response.client_id, set()).discard(response.identity)
 
                     if response.type == ResponseType.HEARTBEAT:
-                        try:
-                            w_methods = set(response.content)
-                        except (ValueError, TypeError):
-                            w_methods = set()
+                        w_methods, _ = _parse_heartbeat_content(response.content)
                         worker_methods[worker] = w_methods
                     elif (
                         strategy == 'balancing'
