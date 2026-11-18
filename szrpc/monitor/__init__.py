@@ -109,6 +109,7 @@ class Monitor:
         }
         self.workers: Dict[str, float] = {}
         self.worker_metrics: Dict[str, Dict[str, Any]] = {}
+        self.worker_methods: Dict[str, list[str]] = {}
         self.store = SqliteMonitorStore(db_path=db_path)
 
     def record_request(self, worker_id: str, client_id: str, request_id: str, method: str, kwargs: Dict[str, Any]):
@@ -153,12 +154,19 @@ class Monitor:
         if row_to_store is not None:
             self.store.enqueue_call(row_to_store)
 
-    def update_worker(self, worker_id: str, metrics: dict[str, Any] | None = None):
+    def update_worker(
+        self,
+        worker_id: str,
+        metrics: dict[str, Any] | None = None,
+        methods: Sequence[str] | None = None,
+    ):
         now = time.time()
         with self.lock:
             self.workers[worker_id] = now
             if metrics is not None:
                 self.worker_metrics[worker_id] = dict(metrics)
+            if methods is not None:
+                self.worker_methods[worker_id] = list(methods)
         if metrics is not None:
             self.store.enqueue_metric({
                 'ts': now,
@@ -178,6 +186,7 @@ class Monitor:
             for wid in worker_set:
                 self.workers.pop(wid, None)
                 self.worker_metrics.pop(wid, None)
+                self.worker_methods.pop(wid, None)
 
             to_remove = [
                 record_id
@@ -212,6 +221,11 @@ class Monitor:
                 for wid in active_workers
                 if wid in self.worker_metrics
             }
+            active_methods = {
+                wid: self.worker_methods[wid]
+                for wid in active_workers
+                if wid in self.worker_methods
+            }
 
             return {
                 **self.service_info,
@@ -225,6 +239,7 @@ class Monitor:
                 },
                 "workers": list(active_workers.keys()),
                 "worker_metrics": active_metrics,
+                "worker_methods": active_methods,
             }
 
     def get_call_details(self, request_id: str) -> Optional[Dict[str, Any]]:

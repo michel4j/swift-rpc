@@ -397,7 +397,12 @@ class MonitorPort(Protocol):
 
     def record_request(self, worker_id: str, client_id: str, request_id: str, method: str, kwargs: dict[str, Any]) -> None: ...
     def record_response(self, worker_id: str, request_id: str, status: str, result: Any) -> None: ...
-    def update_worker(self, worker_id: str, metrics: dict[str, Any] | None = None) -> None: ...
+    def update_worker(
+        self,
+        worker_id: str,
+        metrics: dict[str, Any] | None = None,
+        methods: Sequence[str] | None = None,
+    ) -> None: ...
     def clear_workers(self, workers: Sequence[str]) -> None: ...
 
 
@@ -410,7 +415,12 @@ class NullMonitor:
     def record_response(self, worker_id: str, request_id: str, status: str, result: Any) -> None:
         pass
 
-    def update_worker(self, worker_id: str, metrics: dict[str, Any] | None = None) -> None:
+    def update_worker(
+        self,
+        worker_id: str,
+        metrics: dict[str, Any] | None = None,
+        methods: Sequence[str] | None = None,
+    ) -> None:
         pass
 
     def clear_workers(self, workers: Sequence[str]) -> None:
@@ -564,9 +574,15 @@ class Server(object):
             )
         else:
             metrics = None
+            methods = None
             if response.type == ResponseType.HEARTBEAT:
-                _, metrics = _parse_heartbeat_content(response.content)
-            self.monitor.update_worker(worker.decode('utf-8'), metrics=metrics)
+                w_methods, metrics = _parse_heartbeat_content(response.content)
+                if w_methods:
+                    methods = sorted(w_methods)
+                else:
+                    builtin = {'ping', 'client_config'} | self.service_type.get_control_methods()
+                    methods = sorted(m for m in self.service_type.get_methods() if m not in builtin)
+            self.monitor.update_worker(worker.decode('utf-8'), metrics=metrics, methods=methods)
 
     def _monitor_request(self, worker: bytes, request: Request):
         try:

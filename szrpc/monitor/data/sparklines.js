@@ -196,6 +196,7 @@ export function updateWorkerSparklines({
     tasksPayload = {tasks: {}},
     activeWorkers = new Set(),
     workerMetrics = {},
+    workerMethods = {},
     palette = DEFAULT_PALETTE,
     formatDuration = defaultFormatDuration,
     offscreen = false,
@@ -362,6 +363,35 @@ export function updateWorkerSparklines({
         metricsGrid.appendChild(completedCell);
 
         article.appendChild(metricsGrid);
+
+        const methods = Array.isArray(workerMethods[workerId]) ? workerMethods[workerId] : [];
+        const footer = document.createElement('footer');
+        footer.className = 'worker-spark-footer';
+
+        const methodsLbl = document.createElement('span');
+        methodsLbl.className = 'worker-methods-label';
+        methodsLbl.textContent = 'Methods';
+        footer.appendChild(methodsLbl);
+
+        if (methods.length > 0) {
+            const list = document.createElement('ul');
+            list.className = 'worker-methods-list';
+            list.setAttribute('role', 'list');
+            methods.forEach(methodName => {
+                const item = document.createElement('li');
+                item.className = 'worker-method-tag';
+                item.textContent = methodName;
+                list.appendChild(item);
+            });
+            footer.appendChild(list);
+        } else {
+            const emptyMethods = document.createElement('span');
+            emptyMethods.className = 'worker-methods-empty';
+            emptyMethods.textContent = '-';
+            footer.appendChild(emptyMethods);
+        }
+
+        article.appendChild(footer);
         return article;
     });
 

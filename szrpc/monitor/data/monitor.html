@@ -55,12 +55,89 @@
             color: var(--bs-primary);
         }
 
-        .chart-card {
-            height: 280px;
+        .duration-table-wrapper {
+            overflow: auto;
+            max-inline-size: 100%;
+            max-block-size: min(320px, 60vh);
+            container-type: inline-size;
         }
 
-        .chart-card canvas {
-            max-height: 220px;
+        .duration-table {
+            border-collapse: separate;
+            border-spacing: 0;
+            --label-2: "Calls";
+            --label-3: "Errors";
+            --label-4: "Min";
+            --label-5: "Avg";
+            --label-6: "p95";
+            --label-7: "Max";
+            --label-8: "Payload";
+        }
+
+        .duration-table thead {
+            position: sticky;
+            inset-block-start: 0;
+            z-index: 1;
+            background-color: var(--bs-body-bg);
+        }
+
+        .duration-table tbody th {
+            position: sticky;
+            inset-inline-start: 0;
+            background-color: var(--bs-body-bg);
+            font-family: var(--bs-font-monospace);
+            font-weight: 600;
+            white-space: nowrap;
+        }
+
+        .duration-table td.num,
+        .duration-table th.num {
+            text-align: end;
+            font-family: var(--bs-font-monospace);
+            white-space: nowrap;
+        }
+
+        @container (width < 540px) {
+            .duration-table,
+            .duration-table thead,
+            .duration-table tbody,
+            .duration-table tr,
+            .duration-table th,
+            .duration-table td {
+                display: block;
+            }
+
+            .duration-table thead {
+                display: none;
+            }
+
+            .duration-table tbody tr:not(.empty-row) {
+                margin-block-end: 0.75rem;
+                border: 1px solid var(--bs-border-color);
+                border-radius: var(--bs-border-radius);
+                padding: 0.25rem 0.5rem;
+            }
+
+            .duration-table tbody th {
+                position: sticky;
+                inset-block-start: 0;
+                z-index: 2;
+                border-bottom: 1px solid var(--bs-border-color);
+            }
+
+            .duration-table td.num {
+                display: flex;
+                justify-content: space-between;
+                text-align: end;
+            }
+
+            .duration-table td:nth-child(2)::before { content: var(--label-2) ": "; color: var(--bs-secondary-color); font-family: var(--bs-body-font-family); }
+            .duration-table td:nth-child(3)::before { content: var(--label-3) ": "; color: var(--bs-secondary-color); font-family: var(--bs-body-font-family); }
+            .duration-table td:nth-child(4)::before { content: var(--label-4) ": "; color: var(--bs-secondary-color); font-family: var(--bs-body-font-family); }
+            .duration-table td:nth-child(5)::before { content: var(--label-5) ": "; color: var(--bs-secondary-color); font-family: var(--bs-body-font-family); }
+            .duration-table td:nth-child(6)::before { content: var(--label-6) ": "; color: var(--bs-secondary-color); font-family: var(--bs-body-font-family); }
+            .duration-table td:nth-child(7)::before { content: var(--label-7) ": "; color: var(--bs-secondary-color); font-family: var(--bs-body-font-family); }
+            .duration-table td:nth-child(8)::before { content: var(--label-8) ": "; color: var(--bs-secondary-color); font-family: var(--bs-body-font-family); }
         }
 
         #worker-sparklines-card {
@@ -172,6 +249,49 @@
             block-size: 32px;
         }
 
+        .worker-spark-footer {
+            display: flex;
+            align-items: baseline;
+            gap: 0.4rem;
+            margin-top: auto;
+            padding-top: 0.45rem;
+            border-top: 1px solid var(--bs-border-color);
+            font-size: 0.72rem;
+            min-inline-size: 0;
+        }
+
+        .worker-methods-label {
+            color: var(--bs-secondary-color);
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+            flex-shrink: 0;
+        }
+
+        .worker-methods-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.25rem;
+            list-style: none;
+            margin: 0;
+            padding: 0;
+            min-inline-size: 0;
+        }
+
+        .worker-method-tag {
+            font-family: var(--bs-font-monospace);
+            font-size: 0.68rem;
+            padding: 0.08rem 0.35rem;
+            border: 1px solid var(--bs-border-color);
+            border-radius: var(--bs-border-radius-sm);
+            background-color: var(--bs-body-bg);
+            color: var(--bs-body-color);
+        }
+
+        .worker-methods-empty {
+            color: var(--bs-secondary-color);
+            font-family: var(--bs-font-monospace);
+        }
+
         pre {
             white-space: pre-wrap;
             word-wrap: break-word;
@@ -279,12 +399,30 @@
             </div>
         </div>
         <div class="col-12">
-            <div class="card shadow-sm chart-card">
+            <div class="card shadow-sm">
                 <div class="card-header py-2 d-flex justify-content-between align-items-center">
-                    <span class="fw-semibold">Task Duration by Type (s)</span>
+                    <span class="fw-semibold" id="duration-table-title">Task Duration by Type</span>
                     <small class="text-secondary window-label">15m</small>
                 </div>
-                <div class="card-body p-2"><canvas id="durationChart"></canvas></div>
+                <div class="card-body p-2">
+                    <div tabindex="0" role="region" aria-labelledby="duration-table-title" class="duration-table-wrapper">
+                        <table class="table table-sm small table-hover mb-0 duration-table">
+                            <thead>
+                            <tr>
+                                <th scope="col">Task Type</th>
+                                <th scope="col" class="num">Calls</th>
+                                <th scope="col" class="num">Errors</th>
+                                <th scope="col" class="num">Min</th>
+                                <th scope="col" class="num">Avg</th>
+                                <th scope="col" class="num">p95</th>
+                                <th scope="col" class="num">Max</th>
+                                <th scope="col" class="num">Payload</th>
+                            </tr>
+                            </thead>
+                            <tbody id="duration-table-body"></tbody>
+                        </table>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -349,8 +487,6 @@
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js"
         integrity="sha384-FKyoEForCGlyvwx9Hj09JcYn3nv7wiPVlz7YYwJrWVcXK/BmnVDxM+D2scQbITxI"
         crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"
-        crossorigin="anonymous"></script>
 <script type="module">
     import {updateWorkerSparklines} from './sparklines.js';
 
@@ -363,6 +499,7 @@
     let lastPlotFetch = 0;
     let lastActiveWorkers = new Set();
     let lastWorkerMetrics = {};
+    let lastWorkerMethods = {};
     let lastMetricsPayload = {series: {}};
     let lastTasksPayload = {tasks: {}};
     let sparklinesOffscreen = false;
@@ -444,19 +581,13 @@
         }
     }
 
-    const durationChart = new Chart(document.getElementById('durationChart').getContext('2d'), {
-        type: 'bar',
-        data: {labels: [], datasets: []},
-        options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            animation: false,
-            plugins: {legend: {display: false, position: 'bottom', labels: {boxWidth: 12}}},
-            scales: {
-                y: {beginAtZero: true, title: {display: true, text: 'seconds'}},
-            },
-        },
-    });
+    function formatBytes(bytes) {
+        const val = Number(bytes || 0);
+        if (val < 1024) return `${val} B`;
+        if (val < 1024 * 1024) return `${(val / 1024).toFixed(1)} KB`;
+        if (val < 1024 * 1024 * 1024) return `${(val / (1024 * 1024)).toFixed(2)} MB`;
+        return `${(val / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+    }
 
     function renderSparklines() {
         updateWorkerSparklines({
@@ -465,32 +596,55 @@
             tasksPayload: lastTasksPayload,
             activeWorkers: lastActiveWorkers,
             workerMetrics: lastWorkerMetrics,
+            workerMethods: lastWorkerMethods,
             palette: PALETTE,
             formatDuration,
             offscreen: sparklinesOffscreen,
         });
     }
 
-    function updateDurationChart(summaryPayload) {
+    function updateDurationTable(summaryPayload) {
         const methods = summaryPayload.methods || [];
-        durationChart.data.labels = methods.map(m => `${m.method} (${m.count})`);
-        durationChart.data.datasets = [
-            {
-                label: 'Avg (s)',
-                data: methods.map(m => m.avg_duration),
-                backgroundColor: '#0d6efd99',
-                borderColor: '#0d6efd',
-                borderWidth: 1,
-            },
-            {
-                label: 'p95 (s)',
-                data: methods.map(m => m.p95_duration),
-                backgroundColor: '#fd7e1499',
-                borderColor: '#fd7e14',
-                borderWidth: 1,
-            },
-        ];
-        durationChart.update('none');
+        const tbody = document.getElementById('duration-table-body');
+        if (methods.length === 0) {
+            const tr = document.createElement('tr');
+            tr.className = 'empty-row';
+            const td = document.createElement('td');
+            td.colSpan = 8;
+            td.className = 'text-secondary text-center py-3';
+            td.textContent = 'No tasks recorded in this window.';
+            tr.appendChild(td);
+            tbody.replaceChildren(tr);
+            return;
+        }
+
+        const rows = methods.map(m => {
+            const tr = document.createElement('tr');
+
+            const th = document.createElement('th');
+            th.scope = 'row';
+            th.textContent = m.method || '';
+            tr.appendChild(th);
+
+            const cells = [
+                {text: String(m.count ?? 0)},
+                {text: String(m.errors ?? 0), cls: (m.errors || 0) > 0 ? 'num text-danger fw-semibold' : 'num'},
+                {text: formatDuration(m.min_duration)},
+                {text: formatDuration(m.avg_duration)},
+                {text: formatDuration(m.p95_duration)},
+                {text: formatDuration(m.max_duration)},
+                {text: formatBytes(m.total_bytes)},
+            ];
+            cells.forEach(({text, cls}) => {
+                const td = document.createElement('td');
+                td.className = cls || 'num';
+                td.textContent = text;
+                tr.appendChild(td);
+            });
+            return tr;
+        });
+
+        tbody.replaceChildren(...rows);
     }
 
     async function fetchCalls() {
@@ -530,7 +684,7 @@
         lastMetricsPayload = await metricsRes.json();
         lastTasksPayload = await tasksRes.json();
         renderSparklines();
-        updateDurationChart(await summaryRes.json());
+        updateDurationTable(await summaryRes.json());
         lastPlotFetch = Date.now();
     }
 
@@ -545,6 +699,9 @@
                 Array.from(nextActive).some(w => !lastActiveWorkers.has(w));
             lastActiveWorkers = nextActive;
             lastWorkerMetrics = data.worker_metrics || {};
+            const nextWorkerMethods = data.worker_methods || {};
+            const methodsChanged = JSON.stringify(nextWorkerMethods) !== JSON.stringify(lastWorkerMethods);
+            lastWorkerMethods = nextWorkerMethods;
 
             document.getElementById('server_description').textContent = data.description || '';
             document.getElementById('uptime').textContent = formatDuration(data.stats.uptime);
@@ -576,7 +733,7 @@
 
             if (forcePlots || Date.now() - lastPlotFetch >= 5000) {
                 await fetchPlots();
-            } else if (workersChanged) {
+            } else if (workersChanged || methodsChanged) {
                 renderSparklines();
             }
         } catch (e) {
@@ -628,18 +785,6 @@
     }, 1000);
 
     updateData(true);
-
-    function applyChartFont() {
-        const styles = getComputedStyle(document.body);
-        const bootstrapFont = styles.getPropertyValue('--bs-body-font-family').trim() || styles.fontFamily;
-        Chart.defaults.font.family = bootstrapFont;
-    }
-
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', applyChartFont);
-    } else {
-        applyChartFont();
-    }
 
 </script>
 </body>

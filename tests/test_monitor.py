@@ -23,12 +23,15 @@ def test_monitor_records_and_clears_workers():
     assert len(data['historical_calls']) == 1
 
     # Active call cleared cleanly when worker disconnects (str ID, no infinite loop)
+    monitor.update_worker('w-2', methods=('hello_world', 'date'))
+    assert monitor.get_data()['worker_methods']['w-2'] == ['hello_world', 'date']
     monitor.record_request('w-2', 'c-1', 'req-2', 'ping_pong', {})
     monitor.clear_workers(['w-2'])
     data2 = monitor.get_data()
     assert data2['active_calls'] == []
     assert data2['stats']['total_errors'] == 1
     assert 'w-2' not in data2['workers']
+    assert 'w-2' not in data2['worker_methods']
 
 
 def test_monitor_fastapi_routes():
@@ -80,6 +83,7 @@ def test_server_emits_events_to_injected_monitor():
     assert 'mem_rss' in w_metrics
     assert 'net_rx_bps' in w_metrics
     assert 'net_tx_bps' in w_metrics
+    assert data['worker_methods'] == {'w-1': ['ping_pong']}
     monitor.close()
 
 
@@ -137,6 +141,8 @@ def test_sqlite_store_persistence_and_windowed_queries(tmp_path):
         html = index_resp.path.read_text(encoding='utf-8')
         assert 'id="worker-sparklines-card"' in html
         assert 'id="worker-sparklines"' in html
+        assert 'id="duration-table-body"' in html
+        assert 'chart.js' not in html.lower()
         assert "from './sparklines.js'" in html
 
         sparklines_resp = asyncio.run(routes['/sparklines.js']())
