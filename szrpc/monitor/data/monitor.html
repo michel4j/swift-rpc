@@ -270,34 +270,7 @@
                 </div>
             </div>
         </div>
-        <div class="col-12 col-lg-6">
-            <div class="card shadow-sm chart-card">
-                <div class="card-header py-2 d-flex justify-content-between align-items-center">
-                    <span class="fw-semibold">CPU Loads (%)</span>
-                    <small class="text-secondary window-label">15m</small>
-                </div>
-                <div class="card-body p-2"><canvas id="cpuChart"></canvas></div>
-            </div>
-        </div>
-        <div class="col-12 col-lg-6">
-            <div class="card shadow-sm chart-card">
-                <div class="card-header py-2 d-flex justify-content-between align-items-center">
-                    <span class="fw-semibold">Memory Usage (MB)</span>
-                    <small class="text-secondary window-label">15m</small>
-                </div>
-                <div class="card-body p-2"><canvas id="memChart"></canvas></div>
-            </div>
-        </div>
-        <div class="col-12 col-lg-6">
-            <div class="card shadow-sm chart-card">
-                <div class="card-header py-2 d-flex justify-content-between align-items-center">
-                    <span class="fw-semibold">Network I/O (KB/s)</span>
-                    <small class="text-secondary window-label">15m</small>
-                </div>
-                <div class="card-body p-2"><canvas id="netChart"></canvas></div>
-            </div>
-        </div>
-        <div class="col-12 col-lg-6">
+        <div class="col-12">
             <div class="card shadow-sm chart-card">
                 <div class="card-header py-2 d-flex justify-content-between align-items-center">
                     <span class="fw-semibold">Task Duration by Type (s)</span>
@@ -405,10 +378,6 @@
         return parts.join(' ');
     }
 
-    function formatTs(ts) {
-        return new Date(ts * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', hour12: false});
-    }
-
     function makeCallRow(call, isActive) {
         const tr = document.createElement('tr');
 
@@ -466,28 +435,6 @@
         }
     }
 
-    function makeLineChart(canvasId, yLabel) {
-        const ctx = document.getElementById(canvasId).getContext('2d');
-        return new Chart(ctx, {
-            type: 'line',
-            data: {labels: [], datasets: []},
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                animation: false,
-                interaction: {mode: 'index', intersect: false},
-                plugins: {legend: {display: false, position: 'bottom', labels: {boxWidth: 12}}},
-                scales: {
-                    x: {ticks: {maxTicksLimit: 5}},
-                    y: {beginAtZero: true, title: {display: true, text: yLabel}},
-                },
-            },
-        });
-    }
-
-    const cpuChart = makeLineChart('cpuChart', '%');
-    const memChart = makeLineChart('memChart', 'MB');
-    const netChart = makeLineChart('netChart', 'KB/s');
     const durationChart = new Chart(document.getElementById('durationChart').getContext('2d'), {
         type: 'bar',
         data: {labels: [], datasets: []},
@@ -511,66 +458,6 @@
             palette: PALETTE,
             offscreen: sparklinesOffscreen,
         });
-    }
-
-    function updateWorkerCharts(metricsPayload) {
-        const series = metricsPayload.series || {};
-        const workers = Object.keys(series).sort();
-        const tsSet = new Set();
-        workers.forEach(w => series[w].forEach(pt => tsSet.add(pt.ts)));
-        const sortedTs = Array.from(tsSet).sort((a, b) => a - b);
-        const labels = sortedTs.map(formatTs);
-
-        const buildDatasets = (extractor) => workers.map((w, idx) => {
-            const byTs = new Map(series[w].map(pt => [pt.ts, extractor(pt)]));
-            const color = PALETTE[idx % PALETTE.length];
-            return {
-                label: w,
-                data: sortedTs.map(ts => byTs.get(ts) ?? null),
-                borderColor: color,
-                backgroundColor: color + '22',
-                borderWidth: 2,
-                pointRadius: 0,
-                tension: 0.2,
-                spanGaps: true,
-            };
-        });
-
-        cpuChart.data.labels = labels;
-        cpuChart.data.datasets = buildDatasets(pt => pt.cpu_pct);
-        cpuChart.update('none');
-
-        memChart.data.labels = labels;
-        memChart.data.datasets = buildDatasets(pt => +(pt.mem_rss / (1024 * 1024)).toFixed(2));
-        memChart.update('none');
-
-        const netDatasets = [];
-        workers.forEach((w, idx) => {
-            const byTs = new Map(series[w].map(pt => [pt.ts, pt]));
-            const color = PALETTE[idx % PALETTE.length];
-            netDatasets.push({
-                label: `${w} rx`,
-                data: sortedTs.map(ts => byTs.has(ts) ? +(byTs.get(ts).net_rx_bps / 1024).toFixed(2) : null),
-                borderColor: color,
-                borderWidth: 2,
-                pointRadius: 0,
-                tension: 0.2,
-                spanGaps: true,
-            });
-            netDatasets.push({
-                label: `${w} tx`,
-                data: sortedTs.map(ts => byTs.has(ts) ? +(byTs.get(ts).net_tx_bps / 1024).toFixed(2) : null),
-                borderColor: color,
-                borderDash: [4, 4],
-                borderWidth: 1.5,
-                pointRadius: 0,
-                tension: 0.2,
-                spanGaps: true,
-            });
-        });
-        netChart.data.labels = labels;
-        netChart.data.datasets = netDatasets;
-        netChart.update('none');
     }
 
     function updateDurationChart(summaryPayload) {
@@ -629,7 +516,6 @@
             fetch(`/api/summary?window=${encodeURIComponent(currentWindow)}`),
         ]);
         lastMetricsPayload = await metricsRes.json();
-        updateWorkerCharts(lastMetricsPayload);
         renderSparklines();
         updateDurationChart(await summaryRes.json());
         lastPlotFetch = Date.now();
