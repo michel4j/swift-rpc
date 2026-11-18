@@ -202,7 +202,7 @@ export function updateWorkerSparklines({
                 opts: {zeroBase: false},
             },
             {
-                label: 'Net Rx/Tx',
+                label: 'Net',
                 value: netText,
                 aria: `${workerId} network Rx and Tx sparkline, latest ${netText}`,
                 specs: [
