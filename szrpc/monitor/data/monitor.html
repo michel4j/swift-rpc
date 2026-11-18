@@ -11,6 +11,12 @@
     <style>
         :root {
             --bs-body-font-size: 0.95rem;
+            --bs-border-radius: 0.25rem;
+            --bs-border-radius-lg: 0.25rem;
+            --bs-border-radius-sm: 0.25rem;
+        }
+        .card {
+            --bs-card-border-width: 0;
         }
 
         .status-ACTIVE {
@@ -34,8 +40,8 @@
         }
 
         td {
-            font-family: monospace;
-            font-size: 0.88rem;
+            /*font-family: monospace;*/
+            font-size: 0.8rem;
         }
 
         #server_info {
@@ -67,73 +73,85 @@
         }
     </style>
 </head>
-<body class="p-4 p-md-5 bg-tertiary">
-<div class="container-fluid">
-    <header>
-        <div class="row pb-3 mb-3 border-bottom align-items-center">
-            <div class="col-auto d-flex text-dark">
-                <a href="/" class="text-dark text-decoration-none">
-                    <svg class="me-2" width="50" height="40" role="img" viewBox="0 0 118 94" xmlns="http://www.w3.org/2000/svg">
-                        <path transform="matrix(1 0 -.2566 .9665 0 0)"
-                              d="m38.49 6.154c-7.106 0-12.83 5.723-12.83 12.83l-7.53e-4 59.69c0 7.106 5.722 12.83 12.83 12.83h66.12c7.106 0 12.82-5.723 12.82-12.83l7.5e-4 -59.69c0-7.106-5.722-12.83-12.83-12.83h-66.12zm44.41 16.95 13.81 14.27-0.06917 7.094h-52.62l-0.1147-8.978h40.64l-6.693-6.951 5.048-5.431zm-38.45 27.68h52.62l0.1162 8.984h-40.64l6.691 6.945-5.048 5.431-13.81-14.26 0.06764-7.1z"
-                              fill="currentColor" style="paint-order:stroke markers fill"/>
-                    </svg>
-                </a>
-                <div class="d-flex flex-column">
-                    <div class="fs-5 lh-1">Swift RPC Server&nbsp;&#8942;&nbsp;<span class="text-primary fw-light" id="server_name"></span></div>
-                    <small class="fw-light" id="server_version"></small>
+<body class="bg-tertiary">
+    <header class="sticky-top mb-3 bg-body">
+        <div class="container-fluid">
+            <div class="row border-bottom align-items-center">
+                <div class="col-auto p-2 d-flex" title="" id="server_version">
+                    <a href="/" class="text-body text-decoration-none">
+                        <svg class="me-2" width="40" height="36" role="img" viewBox="0 0 118 94" xmlns="http://www.w3.org/2000/svg">
+                            <path transform="matrix(1 0 -.2566 .9665 0 0)"
+                                  d="m38.49 6.154c-7.106 0-12.83 5.723-12.83 12.83l-7.53e-4 59.69c0 7.106 5.722 12.83 12.83 12.83h66.12c7.106 0 12.82-5.723 12.82-12.83l7.5e-4 -59.69c0-7.106-5.722-12.83-12.83-12.83h-66.12zm44.41 16.95 13.81 14.27-0.06917 7.094h-52.62l-0.1147-8.978h40.64l-6.693-6.951 5.048-5.431zm-38.45 27.68h52.62l0.1162 8.984h-40.64l6.691 6.945-5.048 5.431-13.81-14.26 0.06764-7.1z"
+                                  fill="currentColor" style="paint-order:stroke markers fill"/>
+                        </svg>
+                    </a>
+                    <div class="d-flex flex-column justify-content-center align-items-start">
+                        <div class="lead" id="server_description"></div>
+                    </div>
+                </div>
+                <div class="col d-flex justify-content-end align-items-center gap-3 flex-wrap">
+                    <nav class="d-none d-lg-flex small">
+                        <a class="me-3 py-2 text-dark text-decoration-none"
+                           href="https://github.com/michel4j/swift-rpc/blob/master/README.md">Docs</a>
+                        <a class="me-3 py-2 text-dark text-decoration-none" href="https://github.com/michel4j/swift-rpc">Source</a>
+                        <a class="me-3 py-2 text-dark text-decoration-none" href="https://pypi.org/project/szrpc/">Releases</a>
+                        <a class="py-2 text-dark text-decoration-none" href="https://github.com/michel4j/swift-rpc/issues">Issues</a>
+                    </nav>
                 </div>
             </div>
 
-            <div class="col d-flex justify-content-end align-items-center gap-3 flex-wrap">
-                <div class="btn-group btn-group-sm" role="group" aria-label="Time window" id="window-selector">
-                    <button type="button" class="btn btn-outline-primary active" data-window="15m">15m</button>
-                    <button type="button" class="btn btn-outline-primary" data-window="1h">1h</button>
-                    <button type="button" class="btn btn-outline-primary" data-window="12h">12h</button>
-                    <button type="button" class="btn btn-outline-primary" data-window="1d">1d</button>
+            <div class="row border-bottom align-items-center py-2 gap-2">
+                <div class="col d-flex flex-row text-secondary align-items-center" id="server_info"></div>
+                <div class="col-auto d-flex flex-row align-items-center">
+                    <div class="form-check form-switch mb-0">
+                        <input class="form-check-input" type="checkbox" id="auto-refresh" checked>
+                        <label class="form-check-label small" for="auto-refresh">Auto-refresh</label>
+                    </div>
                 </div>
-                <div class="form-check form-switch mb-0">
-                    <input class="form-check-input" type="checkbox" id="auto-refresh" checked>
-                    <label class="form-check-label small" for="auto-refresh">Auto-refresh</label>
+                <div class="col-auto d-flex flex-row align-items-center">
+                    <div class="btn-group btn-group-sm" role="group" aria-label="Time window" id="window-selector">
+                        <button type="button" class="btn btn-outline-primary active" data-window="15m">15m</button>
+                        <button type="button" class="btn btn-outline-primary" data-window="1h">1h</button>
+                        <button type="button" class="btn btn-outline-primary" data-window="12h">12h</button>
+                        <button type="button" class="btn btn-outline-primary" data-window="1d">1d</button>
+                    </div>
                 </div>
-                <nav class="d-none d-lg-flex">
-                    <a class="me-3 py-2 text-dark text-decoration-none"
-                       href="https://github.com/michel4j/swift-rpc/blob/master/README.md">Docs</a>
-                    <a class="me-3 py-2 text-dark text-decoration-none" href="https://github.com/michel4j/swift-rpc">Source</a>
-                    <a class="me-3 py-2 text-dark text-decoration-none" href="https://pypi.org/project/szrpc/">Releases</a>
-                    <a class="py-2 text-dark text-decoration-none" href="https://github.com/michel4j/swift-rpc/issues">Issues</a>
-                </nav>
             </div>
-        </div>
-        <div class="d-flex flex-column pb-3 mb-4 border-bottom">
-            <div class="lead" id="server_description"></div>
-            <div class="d-flex flex-row flex-wrap text-secondary" id="server_info"></div>
         </div>
     </header>
 
-    <div class="row row-cols-1 row-cols-md-4 mb-3 text-center" id="stats">
+    <div class="container-fluid">
+    <div class="row row-cols-1 row-cols-md-4 g-3 text-center" id="stats">
         <div class="col">
-            <div class="card mb-3 rounded-3 text-primary-emphasis bg-primary-subtle shadow-sm">
-                <div class="card-header py-2"><h5 class="my-0 fw-normal">Uptime</h5></div>
-                <div class="card-body"><span class="fs-2 fw-light" id="uptime">-</span></div>
+            <div class="card mb-3 rounded-3 text-primary-emphasis bg-primary-subtle">
+                <div class="card-body">
+                    <div class="fs-3 fw-light" id="uptime">-</div>
+                    <div class="small text-narrow opacity-50">Uptime</div>
+                </div>
             </div>
         </div>
         <div class="col">
-            <div class="card mb-3 rounded-3 text-info-emphasis bg-info-subtle shadow-sm">
-                <div class="card-header py-2"><h5 class="my-0 fw-normal">Requests</h5></div>
-                <div class="card-body"><span class="fs-2 fw-light" id="total_requests">-</span></div>
+            <div class="card mb-3 rounded-3 text-info-emphasis bg-info-subtle">
+                <div class="card-body">
+                    <div class="fs-3 fw-light" id="total_requests">-</div>
+                    <div class="small text-narrow opacity-50">Requests</div>
+                </div>
             </div>
         </div>
         <div class="col">
-            <div class="card mb-3 rounded-3 text-danger-emphasis bg-danger-subtle shadow-sm">
-                <div class="card-header py-2"><h5 class="my-0 fw-normal">Failed</h5></div>
-                <div class="card-body"><span class="fs-2 fw-light" id="total_errors">-</span></div>
+            <div class="card mb-3 rounded-3 text-danger-emphasis bg-danger-subtle">
+                <div class="card-body">
+                    <div class="fs-3 fw-light" id="total_errors">-</div>
+                    <div class="small text-narrow opacity-50">Failures</div>
+                </div>
             </div>
         </div>
         <div class="col">
-            <div class="card mb-3 rounded-3 shadow-sm">
-                <div class="card-header py-2"><h5 class="my-0 fw-normal">Workers</h5></div>
-                <div class="card-body"><span class="fs-2 fw-light" id="active_workers">-</span></div>
+            <div class="card mb-3 rounded-3 text-success-emphasis bg-success-subtle">
+                <div class="card-body">
+                    <div class="fs-3 fw-light" id="active_workers">-</div>
+                    <div class="small text-narrow opacity-50">Workers</div>
+                </div>
             </div>
         </div>
     </div>
@@ -194,7 +212,7 @@
     </div>
     <div class="row mb-2">
         <div class="col-12 table-responsive">
-            <table class="table table-sm table-hover">
+            <table class="table table-sm small table-hover">
                 <thead>
                 <tr>
                     <th>Time</th>
@@ -217,6 +235,7 @@
             <button class="btn btn-outline-secondary" id="next-page" disabled>Next</button>
         </div>
     </div>
+    </div>
 
     <!-- Modal -->
     <div class="modal fade" id="detailsModal" tabindex="-1" aria-hidden="true">
@@ -233,7 +252,7 @@
             </div>
         </div>
     </div>
-</div>
+
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js"
         integrity="sha384-FKyoEForCGlyvwx9Hj09JcYn3nv7wiPVlz7YYwJrWVcXK/BmnVDxM+D2scQbITxI"
         crossorigin="anonymous"></script>
@@ -241,7 +260,7 @@
         crossorigin="anonymous"></script>
 <script>
     const PALETTE = ['#0d6efd', '#198754', '#dc3545', '#fd7e14', '#6f42c1', '#20c997', '#0dcaf0', '#6c757d'];
-    const PAGE_SIZE = 50;
+    const PAGE_SIZE = 20;
 
     let currentWindow = '15m';
     let currentOffset = 0;
@@ -339,7 +358,7 @@
                 maintainAspectRatio: false,
                 animation: false,
                 interaction: {mode: 'index', intersect: false},
-                plugins: {legend: {position: 'bottom', labels: {boxWidth: 12}}},
+                plugins: {legend: {display: false, position: 'bottom', labels: {boxWidth: 12}}},
                 scales: {
                     x: {ticks: {maxTicksLimit: 8}},
                     y: {beginAtZero: true, title: {display: true, text: yLabel}},
@@ -358,7 +377,7 @@
             responsive: true,
             maintainAspectRatio: false,
             animation: false,
-            plugins: {legend: {position: 'bottom', labels: {boxWidth: 12}}},
+            plugins: {legend: {display: false, position: 'bottom', labels: {boxWidth: 12}}},
             scales: {
                 y: {beginAtZero: true, title: {display: true, text: 'seconds'}},
             },
@@ -490,13 +509,12 @@
             const response = await fetch('/api/data');
             const data = await response.json();
 
-            document.getElementById('server_name').textContent = data.host || '';
             document.getElementById('server_description').textContent = data.description || '';
             document.getElementById('uptime').textContent = formatDuration(data.stats.uptime);
             document.getElementById('total_requests').textContent = data.stats.total_requests;
             document.getElementById('total_errors').textContent = data.stats.total_errors;
             document.getElementById('active_workers').textContent = data.stats.active_workers_count;
-            document.getElementById('server_version').textContent = data.version || '';
+            document.getElementById('server_version').title = `Swift RPC Server ${data.version || ''}`;
 
             const serverInfo = document.getElementById('server_info');
             const items = [
@@ -564,6 +582,14 @@
     }, 1000);
 
     updateData(true);
+
+    document.addEventListener('DOMContentLoaded', () => {
+      const styles = getComputedStyle(document.body);
+      const bootstrapFont = styles.getPropertyValue('--bs-body-font-family').trim() || styles.fontFamily;
+      Chart.defaults.font.family = bootstrapFont;
+
+    });
+
 </script>
 </body>
 </html>
