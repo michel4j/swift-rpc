@@ -63,6 +63,107 @@
             max-height: 220px;
         }
 
+        #worker-sparklines-card {
+            content-visibility: auto;
+            contain-intrinsic-size: auto none auto 220px;
+        }
+
+        .worker-spark-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 0.75rem;
+        }
+
+        .worker-spark-card {
+            container: worker-card / inline-size;
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+            border: 1px solid var(--bs-border-color);
+            border-radius: var(--bs-border-radius);
+            padding: 0.65rem 0.75rem;
+            background-color: var(--bs-tertiary-bg);
+        }
+
+        .worker-spark-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.5rem;
+            min-inline-size: 0;
+        }
+
+        .worker-spark-identity {
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+            min-inline-size: 0;
+        }
+
+        .worker-spark-dot {
+            inline-size: 0.55rem;
+            block-size: 0.55rem;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+
+        .worker-spark-title {
+            font-family: var(--bs-font-monospace);
+            font-size: 0.82rem;
+            font-weight: 600;
+            margin: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .spark-metrics-grid {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr);
+            gap: 0.5rem 0.75rem;
+        }
+
+        @container worker-card (inline-size >= 250px) {
+            .spark-metrics-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+        }
+
+        .spark-metric {
+            display: flex;
+            flex-direction: column;
+            gap: 0.15rem;
+            min-inline-size: 0;
+        }
+
+        .spark-metric-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            gap: 0.35rem;
+            font-size: 0.72rem;
+            line-height: 1.2;
+        }
+
+        .spark-metric-label {
+            color: var(--bs-secondary-color);
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+        }
+
+        .spark-metric-value {
+            font-family: var(--bs-font-monospace);
+            font-weight: 600;
+            white-space: nowrap;
+        }
+
+        .sparkline-svg {
+            display: block;
+            inline-size: 100%;
+            block-size: 28px;
+            overflow: visible;
+        }
+
         pre {
             white-space: pre-wrap;
             word-wrap: break-word;
@@ -194,6 +295,17 @@
                 <div class="card-body p-2"><canvas id="durationChart"></canvas></div>
             </div>
         </div>
+        <div class="col-12">
+            <div class="card shadow-sm" id="worker-sparklines-card">
+                <div class="card-header py-2 d-flex justify-content-between align-items-center">
+                    <span class="fw-semibold">Worker Sparklines</span>
+                    <small class="text-secondary window-label">15m</small>
+                </div>
+                <div class="card-body p-3">
+                    <div id="worker-sparklines" class="worker-spark-grid"></div>
+                </div>
+            </div>
+        </div>
     </div>
 
     <!-- Active & Historical Calls -->
@@ -258,7 +370,9 @@
         crossorigin="anonymous"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"
         crossorigin="anonymous"></script>
-<script>
+<script type="module">
+    import {updateWorkerSparklines} from './sparklines.js';
+
     const PALETTE = ['#0d6efd', '#198754', '#dc3545', '#fd7e14', '#6f42c1', '#20c997', '#0dcaf0', '#6c757d'];
     const PAGE_SIZE = 20;
 
@@ -266,6 +380,10 @@
     let currentOffset = 0;
     let totalCalls = 0;
     let lastPlotFetch = 0;
+    let lastActiveWorkers = new Set();
+    let lastWorkerMetrics = {};
+    let lastMetricsPayload = {series: {}};
+    let sparklinesOffscreen = false;
 
     function formatDuration(seconds) {
         if (seconds === null || seconds === undefined) return '-';
@@ -384,6 +502,17 @@
         },
     });
 
+    function renderSparklines() {
+        updateWorkerSparklines({
+            container: document.getElementById('worker-sparklines'),
+            metricsPayload: lastMetricsPayload,
+            activeWorkers: lastActiveWorkers,
+            workerMetrics: lastWorkerMetrics,
+            palette: PALETTE,
+            offscreen: sparklinesOffscreen,
+        });
+    }
+
     function updateWorkerCharts(metricsPayload) {
         const series = metricsPayload.series || {};
         const workers = Object.keys(series).sort();
@@ -499,7 +628,9 @@
             fetch(`/api/metrics/workers?window=${encodeURIComponent(currentWindow)}`),
             fetch(`/api/summary?window=${encodeURIComponent(currentWindow)}`),
         ]);
-        updateWorkerCharts(await metricsRes.json());
+        lastMetricsPayload = await metricsRes.json();
+        updateWorkerCharts(lastMetricsPayload);
+        renderSparklines();
         updateDurationChart(await summaryRes.json());
         lastPlotFetch = Date.now();
     }
@@ -508,6 +639,13 @@
         try {
             const response = await fetch('/api/data');
             const data = await response.json();
+
+            const nextActive = new Set(data.workers || []);
+            const workersChanged =
+                nextActive.size !== lastActiveWorkers.size ||
+                Array.from(nextActive).some(w => !lastActiveWorkers.has(w));
+            lastActiveWorkers = nextActive;
+            lastWorkerMetrics = data.worker_metrics || {};
 
             document.getElementById('server_description').textContent = data.description || '';
             document.getElementById('uptime').textContent = formatDuration(data.stats.uptime);
@@ -539,11 +677,20 @@
 
             if (forcePlots || Date.now() - lastPlotFetch >= 5000) {
                 await fetchPlots();
+            } else if (workersChanged) {
+                renderSparklines();
             }
         } catch (e) {
             console.error('Failed to fetch data', e);
         }
     }
+
+    document.getElementById('worker-sparklines-card').addEventListener('contentvisibilityautostatechange', (event) => {
+        sparklinesOffscreen = event.skipped;
+        if (!event.skipped) {
+            renderSparklines();
+        }
+    });
 
     document.querySelectorAll('#window-selector button').forEach(btn => {
         btn.addEventListener('click', () => {
@@ -583,12 +730,17 @@
 
     updateData(true);
 
-    document.addEventListener('DOMContentLoaded', () => {
-      const styles = getComputedStyle(document.body);
-      const bootstrapFont = styles.getPropertyValue('--bs-body-font-family').trim() || styles.fontFamily;
-      Chart.defaults.font.family = bootstrapFont;
+    function applyChartFont() {
+        const styles = getComputedStyle(document.body);
+        const bootstrapFont = styles.getPropertyValue('--bs-body-font-family').trim() || styles.fontFamily;
+        Chart.defaults.font.family = bootstrapFont;
+    }
 
-    });
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', applyChartFont);
+    } else {
+        applyChartFont();
+    }
 
 </script>
 </body>

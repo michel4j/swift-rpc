@@ -129,6 +129,16 @@ def test_sqlite_store_persistence_and_windowed_queries(tmp_path):
         assert asyncio.run(routes['/api/summary'](window='15m'))['total_requests'] == 2
         assert 'w-1' in asyncio.run(routes['/api/metrics/workers'](window='15m', worker_id=None))['series']
         assert asyncio.run(routes['/api/calls'](window='15m', status=None, method=None, worker_id=None, limit=10, offset=0))['total'] == 2
+        index_resp = asyncio.run(routes['/']())
+        html = index_resp.path.read_text(encoding='utf-8')
+        assert 'id="worker-sparklines-card"' in html
+        assert 'id="worker-sparklines"' in html
+        assert "from './sparklines.js'" in html
+
+        sparklines_resp = asyncio.run(routes['/sparklines.js']())
+        assert sparklines_resp.media_type == 'text/javascript'
+        sparklines_js = sparklines_resp.path.read_text(encoding='utf-8')
+        assert 'export function updateWorkerSparklines' in sparklines_js
 
         # Retention pruning removes expired rows
         old_ts = time.time() - 10 * 86400

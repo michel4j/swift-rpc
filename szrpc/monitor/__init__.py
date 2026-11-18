@@ -320,6 +320,13 @@ def create_app(monitor: Monitor) -> FastAPI:
     async def index():
         return FileResponse(Path(__file__).parent / "data" / "monitor.html")
 
+    @app.get("/sparklines.js")
+    async def sparklines_js():
+        return FileResponse(
+            Path(__file__).parent / "data" / "sparklines.js",
+            media_type="text/javascript",
+        )
+
     return app
 
 
