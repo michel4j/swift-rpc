@@ -406,7 +406,7 @@
     }
 
     function formatTs(ts) {
-        return new Date(ts * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit'});
+        return new Date(ts * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', hour12: false});
     }
 
     function makeCallRow(call, isActive) {
@@ -478,7 +478,7 @@
                 interaction: {mode: 'index', intersect: false},
                 plugins: {legend: {display: false, position: 'bottom', labels: {boxWidth: 12}}},
                 scales: {
-                    x: {ticks: {maxTicksLimit: 8}},
+                    x: {ticks: {maxTicksLimit: 5}},
                     y: {beginAtZero: true, title: {display: true, text: yLabel}},
                 },
             },
