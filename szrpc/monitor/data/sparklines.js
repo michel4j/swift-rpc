@@ -1,5 +1,43 @@
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const DEFAULT_PALETTE = ['#0d6efd', '#198754', '#dc3545', '#fd7e14', '#6f42c1', '#20c997', '#0dcaf0', '#6c757d'];
+const STATUS_COLORS = {
+    DONE: 'var(--bs-success, #198754)',
+    ERROR: 'var(--bs-danger, #dc3545)',
+};
+
+function defaultFormatDuration(seconds) {
+    if (seconds === null || seconds === undefined) return '-';
+    const s = Math.abs(Number(seconds));
+    if (s > 0 && s < 1) return `${(s * 1000).toFixed(0)}ms`;
+    if (s < 60) return `${s.toFixed(s < 10 ? 2 : 1)}s`;
+    return `${Math.floor(s / 60)}m ${Math.floor(s % 60)}s`;
+}
+
+function createSvgShell(width, height, ariaLabel, extraClass = '') {
+    const svg = document.createElementNS(SVG_NS, 'svg');
+    svg.setAttribute('class', extraClass ? `sparkline-svg ${extraClass}` : 'sparkline-svg');
+    svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+    svg.setAttribute('preserveAspectRatio', 'none');
+    svg.setAttribute('role', 'img');
+    svg.setAttribute('aria-label', ariaLabel);
+
+    const title = document.createElementNS(SVG_NS, 'title');
+    title.textContent = ariaLabel;
+    svg.appendChild(title);
+    return svg;
+}
+
+function appendEmptyBaseline(svg, width, height, padX) {
+    const baseline = document.createElementNS(SVG_NS, 'line');
+    baseline.setAttribute('x1', String(padX));
+    baseline.setAttribute('y1', String(height / 2));
+    baseline.setAttribute('x2', String(width - padX));
+    baseline.setAttribute('y2', String(height / 2));
+    baseline.setAttribute('stroke', 'currentColor');
+    baseline.setAttribute('stroke-opacity', '0.2');
+    baseline.setAttribute('stroke-dasharray', '2 2');
+    svg.appendChild(baseline);
+}
 
 /**
  * Build an accessible inline SVG sparkline for one or more metric series.
@@ -10,28 +48,10 @@ export function buildSparklineSvg(seriesSpecs, {ariaLabel, zeroBase = false, min
     const padX = 2;
     const padY = 3;
 
-    const svg = document.createElementNS(SVG_NS, 'svg');
-    svg.setAttribute('class', 'sparkline-svg');
-    svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
-    svg.setAttribute('preserveAspectRatio', 'none');
-    svg.setAttribute('role', 'img');
-    svg.setAttribute('aria-label', ariaLabel);
-
-    const title = document.createElementNS(SVG_NS, 'title');
-    title.textContent = ariaLabel;
-    svg.appendChild(title);
-
+    const svg = createSvgShell(width, height, ariaLabel);
     const allVals = seriesSpecs.flatMap(s => s.values);
     if (allVals.length === 0) {
-        const baseline = document.createElementNS(SVG_NS, 'line');
-        baseline.setAttribute('x1', String(padX));
-        baseline.setAttribute('y1', String(height / 2));
-        baseline.setAttribute('x2', String(width - padX));
-        baseline.setAttribute('y2', String(height / 2));
-        baseline.setAttribute('stroke', 'currentColor');
-        baseline.setAttribute('stroke-opacity', '0.2');
-        baseline.setAttribute('stroke-dasharray', '2 2');
-        svg.appendChild(baseline);
+        appendEmptyBaseline(svg, width, height, padX);
         return svg;
     }
 
@@ -104,23 +124,90 @@ export function buildSparklineSvg(seriesSpecs, {ariaLabel, zeroBase = false, min
 }
 
 /**
+ * Build an accessible inline SVG column/needle sparkline for completed tasks.
+ * Each bar (or vertical line when dense) encodes task duration as height and status as color.
+ */
+export function buildColumnSparklineSvg(tasks, {ariaLabel, formatDuration = defaultFormatDuration} = {}) {
+    const width = 240;
+    const height = 32;
+    const padX = 2;
+    const padY = 2;
+
+    const svg = createSvgShell(width, height, ariaLabel, 'sparkline-svg-tall');
+    if (!tasks || tasks.length === 0) {
+        appendEmptyBaseline(svg, width, height, padX);
+        return svg;
+    }
+
+    const plotW = width - 2 * padX;
+    const plotH = height - 2 * padY;
+    const baseY = height - padY;
+    const durations = tasks.map(t => Math.max(0, Number(t.duration || 0)));
+    const maxDur = Math.max(...durations, 1e-6);
+
+    const step = Math.min(12, plotW / tasks.length);
+    const gap = step >= 3 ? Math.max(1, step * 0.22) : 0;
+    const barW = step - gap;
+    const useLines = barW < 2;
+
+    tasks.forEach((task, i) => {
+        const dur = durations[i];
+        const barH = +Math.max(2, (dur / maxDur) * plotH).toFixed(2);
+        const yTop = +(baseY - barH).toFixed(2);
+        const color = STATUS_COLORS[task.status] || STATUS_COLORS.DONE;
+        const tipText = `${task.method || 'task'} (${task.status || 'DONE'}, ${formatDuration(dur)})`;
+
+        let shape;
+        if (useLines) {
+            shape = document.createElementNS(SVG_NS, 'line');
+            const x = +(padX + (i + 0.5) * step).toFixed(2);
+            shape.setAttribute('x1', String(x));
+            shape.setAttribute('x2', String(x));
+            shape.setAttribute('y1', String(baseY));
+            shape.setAttribute('y2', String(yTop));
+            shape.setAttribute('stroke', color);
+            shape.setAttribute('stroke-width', '1.25');
+            shape.setAttribute('vector-effect', 'non-scaling-stroke');
+        } else {
+            shape = document.createElementNS(SVG_NS, 'rect');
+            shape.setAttribute('x', String(+(padX + i * step).toFixed(2)));
+            shape.setAttribute('y', String(yTop));
+            shape.setAttribute('width', String(+barW.toFixed(2)));
+            shape.setAttribute('height', String(barH));
+            shape.setAttribute('rx', '0.75');
+            shape.setAttribute('fill', color);
+        }
+
+        const tip = document.createElementNS(SVG_NS, 'title');
+        tip.textContent = tipText;
+        shape.appendChild(tip);
+        svg.appendChild(shape);
+    });
+
+    return svg;
+}
+
+/**
  * Render per-worker sparkline cards into `container`.
  */
 export function updateWorkerSparklines({
     container,
     metricsPayload,
+    tasksPayload = {tasks: {}},
     activeWorkers = new Set(),
     workerMetrics = {},
     palette = DEFAULT_PALETTE,
+    formatDuration = defaultFormatDuration,
     offscreen = false,
 }) {
     if (offscreen || !container) return;
 
     const series = (metricsPayload && metricsPayload.series) || {};
+    const tasksByWorker = (tasksPayload && tasksPayload.tasks) || {};
     const seriesWorkers = Object.keys(series).sort();
     const colorByWorker = new Map(seriesWorkers.map((w, idx) => [w, palette[idx % palette.length]]));
 
-    const allWorkersSet = new Set([...seriesWorkers, ...activeWorkers]);
+    const allWorkersSet = new Set([...seriesWorkers, ...Object.keys(tasksByWorker), ...activeWorkers]);
     const workers = Array.from(allWorkersSet).sort();
 
     if (workers.length === 0) {
@@ -136,6 +223,7 @@ export function updateWorkerSparklines({
         if (pts.length === 0 && workerMetrics[workerId]) {
             pts = [workerMetrics[workerId]];
         }
+        const workerTasks = tasksByWorker[workerId] || [];
         const color = colorByWorker.get(workerId) || palette[fallbackIdx % palette.length];
         const isActive = activeWorkers.has(workerId);
 
@@ -239,6 +327,39 @@ export function updateWorkerSparklines({
             cell.append(head, buildSparklineSvg(specs, {ariaLabel: aria, ...opts}));
             metricsGrid.appendChild(cell);
         });
+
+        const errCount = workerTasks.filter(t => t.status === 'ERROR').length;
+        const doneCount = workerTasks.length - errCount;
+        const maxDur = workerTasks.length
+            ? Math.max(...workerTasks.map(t => Number(t.duration || 0)))
+            : null;
+        const completedSummary = workerTasks.length
+            ? `${workerTasks.length}${errCount ? ` (${errCount} err)` : ''} · max ${formatDuration(maxDur)}`
+            : '-';
+
+        const completedCell = document.createElement('div');
+        completedCell.className = 'spark-metric spark-metric-full';
+
+        const completedHead = document.createElement('div');
+        completedHead.className = 'spark-metric-head';
+
+        const completedLbl = document.createElement('span');
+        completedLbl.className = 'spark-metric-label';
+        completedLbl.textContent = 'Completed';
+
+        const completedVal = document.createElement('span');
+        completedVal.className = 'spark-metric-value';
+        completedVal.textContent = completedSummary;
+
+        completedHead.append(completedLbl, completedVal);
+        completedCell.append(
+            completedHead,
+            buildColumnSparklineSvg(workerTasks, {
+                ariaLabel: `${workerId} completed tasks: ${doneCount} succeeded, ${errCount} failed${maxDur !== null ? `, max ${formatDuration(maxDur)}` : ''}`,
+                formatDuration,
+            }),
+        );
+        metricsGrid.appendChild(completedCell);
 
         article.appendChild(metricsGrid);
         return article;

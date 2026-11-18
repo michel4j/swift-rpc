@@ -136,6 +136,10 @@
             min-inline-size: 0;
         }
 
+        .spark-metric-full {
+            grid-column: 1 / -1;
+        }
+
         .spark-metric-head {
             display: flex;
             justify-content: space-between;
@@ -162,6 +166,10 @@
             inline-size: 100%;
             block-size: 28px;
             overflow: visible;
+        }
+
+        .sparkline-svg-tall {
+            block-size: 32px;
         }
 
         pre {
@@ -356,6 +364,7 @@
     let lastActiveWorkers = new Set();
     let lastWorkerMetrics = {};
     let lastMetricsPayload = {series: {}};
+    let lastTasksPayload = {tasks: {}};
     let sparklinesOffscreen = false;
 
     function formatDuration(seconds) {
@@ -453,9 +462,11 @@
         updateWorkerSparklines({
             container: document.getElementById('worker-sparklines'),
             metricsPayload: lastMetricsPayload,
+            tasksPayload: lastTasksPayload,
             activeWorkers: lastActiveWorkers,
             workerMetrics: lastWorkerMetrics,
             palette: PALETTE,
+            formatDuration,
             offscreen: sparklinesOffscreen,
         });
     }
@@ -511,11 +522,13 @@
     }
 
     async function fetchPlots() {
-        const [metricsRes, summaryRes] = await Promise.all([
+        const [metricsRes, tasksRes, summaryRes] = await Promise.all([
             fetch(`/api/metrics/workers?window=${encodeURIComponent(currentWindow)}`),
+            fetch(`/api/metrics/tasks?window=${encodeURIComponent(currentWindow)}`),
             fetch(`/api/summary?window=${encodeURIComponent(currentWindow)}`),
         ]);
         lastMetricsPayload = await metricsRes.json();
+        lastTasksPayload = await tasksRes.json();
         renderSparklines();
         updateDurationChart(await summaryRes.json());
         lastPlotFetch = Date.now();

@@ -277,6 +277,54 @@ class SqliteMonitorStore:
             'series': dict(series),
         }
 
+    def get_worker_tasks(
+        self,
+        window: str = '15m',
+        worker_id: str | None = None,
+        limit_per_worker: int = 120,
+    ) -> dict[str, Any]:
+        """Return recent completed task durations and statuses per worker in chronological order."""
+        duration, _ = WINDOWS.get(window, WINDOWS['15m'])
+        cutoff = time.time() - duration
+
+        query = (
+            self.CallRecord.select(
+                self.CallRecord.worker_id,
+                self.CallRecord.method,
+                self.CallRecord.duration,
+                self.CallRecord.status,
+                self.CallRecord.end_time,
+            )
+            .where(
+                (self.CallRecord.start_time >= cutoff)
+                & (self.CallRecord.status.in_(['DONE', 'ERROR']))
+                & (self.CallRecord.duration.is_null(False))
+            )
+            .order_by(self.CallRecord.start_time.desc())
+        )
+        if worker_id:
+            query = query.where(self.CallRecord.worker_id == worker_id)
+
+        tasks_by_worker: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in query.dicts():
+            wid = row['worker_id']
+            bucket = tasks_by_worker[wid]
+            if len(bucket) < limit_per_worker:
+                bucket.append({
+                    'method': row['method'],
+                    'duration': round(float(row['duration'] or 0.0), 4),
+                    'status': row['status'],
+                    'end_time': row['end_time'],
+                })
+
+        for bucket in tasks_by_worker.values():
+            bucket.reverse()
+
+        return {
+            'window': window if window in WINDOWS else '15m',
+            'tasks': dict(tasks_by_worker),
+        }
+
     def get_summary(self, window: str = '15m') -> dict[str, Any]:
         """Return per-method counts, error counts, and duration statistics for the window."""
         duration, _ = WINDOWS.get(window, WINDOWS['15m'])

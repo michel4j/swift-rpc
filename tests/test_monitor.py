@@ -128,6 +128,10 @@ def test_sqlite_store_persistence_and_windowed_queries(tmp_path):
         routes = {r.path: r.endpoint for r in app.routes if hasattr(r, 'endpoint')}
         assert asyncio.run(routes['/api/summary'](window='15m'))['total_requests'] == 2
         assert 'w-1' in asyncio.run(routes['/api/metrics/workers'](window='15m', worker_id=None))['series']
+        worker_tasks = asyncio.run(routes['/api/metrics/tasks'](window='15m', worker_id=None, limit_per_worker=120))['tasks']
+        assert [t['status'] for t in worker_tasks['w-1']] == ['DONE', 'ERROR']
+        assert [t['method'] for t in worker_tasks['w-1']] == ['fast', 'slow']
+        assert all(t['duration'] >= 0.0 for t in worker_tasks['w-1'])
         assert asyncio.run(routes['/api/calls'](window='15m', status=None, method=None, worker_id=None, limit=10, offset=0))['total'] == 2
         index_resp = asyncio.run(routes['/']())
         html = index_resp.path.read_text(encoding='utf-8')

@@ -243,6 +243,18 @@ class Monitor:
     def get_worker_metrics(self, window: str = '15m', worker_id: str | None = None) -> Dict[str, Any]:
         return self.store.get_worker_metrics(window=window, worker_id=worker_id)
 
+    def get_worker_tasks(
+        self,
+        window: str = '15m',
+        worker_id: str | None = None,
+        limit_per_worker: int = 120,
+    ) -> Dict[str, Any]:
+        return self.store.get_worker_tasks(
+            window=window,
+            worker_id=worker_id,
+            limit_per_worker=limit_per_worker,
+        )
+
     def get_calls(
         self,
         window: str | None = None,
@@ -297,6 +309,20 @@ def create_app(monitor: Monitor) -> FastAPI:
         if window not in WINDOWS:
             window = "15m"
         return monitor.get_worker_metrics(window=window, worker_id=worker_id)
+
+    @app.get("/api/metrics/tasks")
+    async def get_worker_tasks(
+        window: str = Query(default="15m"),
+        worker_id: Optional[str] = Query(default=None),
+        limit_per_worker: int = Query(default=120, ge=1, le=500),
+    ):
+        if window not in WINDOWS:
+            window = "15m"
+        return monitor.get_worker_tasks(
+            window=window,
+            worker_id=worker_id,
+            limit_per_worker=limit_per_worker,
+        )
 
     @app.get("/api/calls")
     async def get_calls(
