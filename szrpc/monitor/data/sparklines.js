@@ -1,9 +1,28 @@
 const SVG_NS = 'http://www.w3.org/2000/svg';
-const DEFAULT_PALETTE = ['#0d6efd', '#198754', '#dc3545', '#fd7e14', '#6f42c1', '#20c997', '#0dcaf0', '#6c757d'];
-const STATUS_COLORS = {
-    DONE: 'var(--bs-success, #198754)',
-    ERROR: 'var(--bs-danger, #dc3545)',
+
+export const DEFAULT_PALETTE = [
+    'var(--tblr-primary, #066fd1)',
+    'var(--tblr-success, #2fb344)',
+    'var(--tblr-danger, #d63939)',
+    'var(--tblr-warning, #f59f00)',
+    'var(--tblr-purple, #ae3ec9)',
+    'var(--tblr-teal, #0ca678)',
+    'var(--tblr-cyan, #17a2b8)',
+    'var(--tblr-secondary, #6b7280)',
+];
+
+export const STATUS_COLORS = {
+    DONE: 'var(--tblr-success, #2fb344)',
+    ERROR: 'var(--tblr-danger, #d63939)',
 };
+
+function compareWorkerIds(a, b) {
+    const cmp = a.localeCompare(b);
+    if (cmp !== 0) return cmp;
+    if (a < b) return -1;
+    if (a > b) return 1;
+    return 0;
+}
 
 function defaultFormatDuration(seconds) {
     if (seconds === null || seconds === undefined) return '-';
@@ -37,6 +56,45 @@ function appendEmptyBaseline(svg, width, height, padX) {
     baseline.setAttribute('stroke-opacity', '0.2');
     baseline.setAttribute('stroke-dasharray', '2 2');
     svg.appendChild(baseline);
+}
+
+/**
+ * Partition known Workers in the current window into sorted Active and Offline lists.
+ * Returns `{ active, offline, ordered, all }` where `ordered` places Active Workers
+ * alphabetically first followed by Offline Workers alphabetically below.
+ */
+export function partitionWorkers({
+    metricsPayload = null,
+    tasksPayload = {tasks: {}},
+    activeWorkers = new Set(),
+} = {}) {
+    const series = (metricsPayload && metricsPayload.series) || {};
+    const tasksByWorker = (tasksPayload && tasksPayload.tasks) || {};
+    const activeSet = activeWorkers instanceof Set ? activeWorkers : new Set(activeWorkers || []);
+
+    const allSet = new Set([
+        ...Object.keys(series),
+        ...Object.keys(tasksByWorker),
+        ...activeSet,
+    ]);
+
+    const active = [];
+    const offline = [];
+    for (const workerId of allSet) {
+        if (activeSet.has(workerId)) {
+            active.push(workerId);
+        } else {
+            offline.push(workerId);
+        }
+    }
+
+    active.sort(compareWorkerIds);
+    offline.sort(compareWorkerIds);
+
+    const all = Array.from(allSet).sort(compareWorkerIds);
+    const ordered = [...active, ...offline];
+
+    return {active, offline, ordered, all};
 }
 
 /**
@@ -124,8 +182,8 @@ export function buildSparklineSvg(seriesSpecs, {ariaLabel, zeroBase = false, min
 }
 
 /**
- * Build an accessible inline SVG column/needle sparkline for completed tasks.
- * Each bar (or vertical line when dense) encodes task duration as height and status as color.
+ * Build an accessible inline SVG column/needle sparkline for completed Requests.
+ * Each bar (or vertical line when dense) encodes Request duration as height and status as color.
  */
 export function buildColumnSparklineSvg(tasks, {ariaLabel, formatDuration = defaultFormatDuration} = {}) {
     const width = 240;
@@ -155,7 +213,7 @@ export function buildColumnSparklineSvg(tasks, {ariaLabel, formatDuration = defa
         const barH = +Math.max(2, (dur / maxDur) * plotH).toFixed(2);
         const yTop = +(baseY - barH).toFixed(2);
         const color = STATUS_COLORS[task.status] || STATUS_COLORS.DONE;
-        const tipText = `${task.method || 'task'} (${task.status || 'DONE'}, ${formatDuration(dur)})`;
+        const tipText = `${task.method || 'request'} (${task.status || 'DONE'}, ${formatDuration(dur)})`;
 
         let shape;
         if (useLines) {
@@ -188,7 +246,8 @@ export function buildColumnSparklineSvg(tasks, {ariaLabel, formatDuration = defa
 }
 
 /**
- * Render per-worker sparkline cards into `container`.
+ * Render per-Worker Tabler-themed sparkline cards into `container`.
+ * Active Workers are ordered alphabetically first, followed by Offline Workers below.
  */
 export function updateWorkerSparklines({
     container,
@@ -200,21 +259,37 @@ export function updateWorkerSparklines({
     palette = DEFAULT_PALETTE,
     formatDuration = defaultFormatDuration,
     offscreen = false,
+    statusFilter = 'all',
+    onMethodClick = null,
+    emptyMessage = null,
 }) {
     if (offscreen || !container) return;
 
     const series = (metricsPayload && metricsPayload.series) || {};
     const tasksByWorker = (tasksPayload && tasksPayload.tasks) || {};
-    const seriesWorkers = Object.keys(series).sort();
-    const colorByWorker = new Map(seriesWorkers.map((w, idx) => [w, palette[idx % palette.length]]));
+    const activeSet = activeWorkers instanceof Set ? activeWorkers : new Set(activeWorkers || []);
+    const {active, offline, ordered, all} = partitionWorkers({
+        metricsPayload,
+        tasksPayload,
+        activeWorkers: activeSet,
+    });
 
-    const allWorkersSet = new Set([...seriesWorkers, ...Object.keys(tasksByWorker), ...activeWorkers]);
-    const workers = Array.from(allWorkersSet).sort();
+    const colorByWorker = new Map(all.map((w, idx) => [w, palette[idx % palette.length]]));
+
+    let workers;
+    if (statusFilter === 'active') {
+        workers = active;
+    } else if (statusFilter === 'offline') {
+        workers = offline;
+    } else {
+        workers = ordered;
+    }
 
     if (workers.length === 0) {
         const empty = document.createElement('div');
         empty.className = 'text-secondary small';
-        empty.textContent = 'No worker telemetry recorded in this window.';
+        empty.style.gridColumn = '1 / -1';
+        empty.textContent = emptyMessage || 'No Worker telemetry recorded in this window.';
         container.replaceChildren(empty);
         return;
     }
@@ -226,10 +301,19 @@ export function updateWorkerSparklines({
         }
         const workerTasks = tasksByWorker[workerId] || [];
         const color = colorByWorker.get(workerId) || palette[fallbackIdx % palette.length];
-        const isActive = activeWorkers.has(workerId);
+        const isActive = activeSet.has(workerId);
 
         const article = document.createElement('article');
-        article.className = 'worker-spark-card';
+        article.className = isActive ? 'card worker-spark-card' : 'card worker-spark-card opacity-75';
+        article.dataset.workerId = workerId;
+        article.dataset.workerStatus = isActive ? 'active' : 'offline';
+
+        const statusAccent = document.createElement('div');
+        statusAccent.className = isActive
+            ? 'card-status-top bg-success'
+            : 'card-status-top bg-secondary opacity-50';
+        statusAccent.setAttribute('aria-hidden', 'true');
+        article.appendChild(statusAccent);
 
         const header = document.createElement('header');
         header.className = 'worker-spark-header';
@@ -250,9 +334,7 @@ export function updateWorkerSparklines({
         identity.append(dot, title);
 
         const statusBadge = document.createElement('span');
-        statusBadge.className = isActive
-            ? 'badge rounded-pill text-bg-success'
-            : 'badge rounded-pill bg-secondary-subtle text-secondary-emphasis';
+        statusBadge.className = isActive ? 'badge bg-green-lt' : 'badge bg-secondary-lt';
         statusBadge.textContent = isActive ? 'Active' : 'Offline';
 
         header.append(identity, statusBadge);
@@ -262,7 +344,7 @@ export function updateWorkerSparklines({
         const memVals = pts.map(pt => +((Number(pt.mem_rss || 0)) / (1024 * 1024)).toFixed(2));
         const rxVals = pts.map(pt => +((Number(pt.net_rx_bps || 0)) / 1024).toFixed(2));
         const txVals = pts.map(pt => +((Number(pt.net_tx_bps || 0)) / 1024).toFixed(2));
-        const taskVals = pts.map(pt => Number(pt.active_tasks || 0));
+        const activeReqVals = pts.map(pt => Number(pt.active_tasks || 0));
 
         const latest = (arr, fmt) => arr.length ? fmt(arr[arr.length - 1]) : '-';
         const cpuText = latest(cpuVals, v => `${v.toFixed(1)}%`);
@@ -270,7 +352,7 @@ export function updateWorkerSparklines({
         const netText = pts.length
             ? `${rxVals[rxVals.length - 1].toFixed(1)} / ${txVals[txVals.length - 1].toFixed(1)} KB/s`
             : '-';
-        const tasksText = latest(taskVals, v => `${Math.round(v)}`);
+        const activeReqText = latest(activeReqVals, v => `${Math.round(v)}`);
 
         const metricsGrid = document.createElement('div');
         metricsGrid.className = 'spark-metrics-grid';
@@ -301,10 +383,10 @@ export function updateWorkerSparklines({
                 opts: {zeroBase: true, minSpan: 0.1},
             },
             {
-                label: 'Tasks',
-                value: tasksText,
-                aria: `${workerId} active tasks sparkline, latest ${tasksText}`,
-                specs: [{values: taskVals, color, fill: true}],
+                label: 'Active Requests',
+                value: activeReqText,
+                aria: `${workerId} active Requests sparkline, latest ${activeReqText}`,
+                specs: [{values: activeReqVals, color, fill: true}],
                 opts: {zeroBase: true, minSpan: 1},
             },
         ];
@@ -356,7 +438,7 @@ export function updateWorkerSparklines({
         completedCell.append(
             completedHead,
             buildColumnSparklineSvg(workerTasks, {
-                ariaLabel: `${workerId} completed tasks: ${doneCount} succeeded, ${errCount} failed${maxDur !== null ? `, max ${formatDuration(maxDur)}` : ''}`,
+                ariaLabel: `${workerId} completed Requests: ${doneCount} succeeded, ${errCount} failed${maxDur !== null ? `, max ${formatDuration(maxDur)}` : ''}`,
                 formatDuration,
             }),
         );
@@ -379,8 +461,23 @@ export function updateWorkerSparklines({
             list.setAttribute('role', 'list');
             methods.forEach(methodName => {
                 const item = document.createElement('li');
-                item.className = 'worker-method-tag';
-                item.textContent = methodName;
+                if (typeof onMethodClick === 'function') {
+                    const btn = document.createElement('button');
+                    btn.type = 'button';
+                    btn.className = 'worker-method-tag';
+                    btn.textContent = methodName;
+                    btn.dataset.worker = workerId;
+                    btn.dataset.method = methodName;
+                    btn.title = `View ${methodName} Requests on ${workerId}`;
+                    btn.setAttribute('aria-label', `Filter Requests by method ${methodName} on Worker ${workerId}`);
+                    btn.addEventListener('click', () => onMethodClick(workerId, methodName));
+                    item.appendChild(btn);
+                } else {
+                    const tag = document.createElement('span');
+                    tag.className = 'worker-method-tag';
+                    tag.textContent = methodName;
+                    item.appendChild(tag);
+                }
                 list.appendChild(item);
             });
             footer.appendChild(list);
