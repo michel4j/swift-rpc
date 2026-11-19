@@ -1,22 +1,20 @@
 from __future__ import annotations
 
 import functools
-import re
 import os
-import sys
-import time
-import uuid
 import queue
 import socket
+import time
+import uuid
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
-from pathlib import Path
-
-from typing import Any, Callable, Protocol, Type, Literal, Sequence
-from threading import Event, Lock, Thread, current_thread
 from multiprocessing import Process
+from pathlib import Path
+from threading import Event, Lock, Thread, current_thread
+from typing import Any, Callable, Protocol, Type, Literal, Sequence
 
 import zmq
+
 from . import log, namer, __version__
 from .protocol import Request, Response, ResponseType
 from .transport import (
@@ -260,6 +258,7 @@ def _resolve_service(target) -> tuple[Type[Service], Callable[[], Service]]:
 class Worker(object):
     """
     A worker which manages an instance of the Service. Each worker is able to perform the same tasks
+    or a restricted set specified through the "methods" parameter
     """
 
     def __init__(
@@ -503,7 +502,7 @@ class Server(object):
         service_factory,
         ports: tuple = (9990, 9991),
         instances: int = 1,
-        monitor_port: int = None,
+        monitor_port: int | None = None,
         monitor_db: str | Path | None = None,
         transport: BrokerTransport | None = None,
         monitor: MonitorPort | None = None,
@@ -553,6 +552,8 @@ class Server(object):
                 'version': f"v{__version__}",
                 'frontend': self.frontend_addr,
                 'backend': self.backend_addr,
+                'publish': self.pub_addr,
+                'subscribe': self.xsub_addr,
                 'description': self.service_type.get_description(),
                 'methods': self.service_type.get_methods()
             }

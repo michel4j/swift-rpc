@@ -372,7 +372,7 @@ def create_app(monitor: Monitor) -> FastAPI:
 
 
 def run_introspection_server(monitor: Monitor, host: str = "0.0.0.0", port: int = 8080):
-    logger.info(f"Starting dashboard at {host}:{port}")
+    logger.info(f"Starting dashboard at http://*:{port}")
     uvicorn.run(create_app(monitor), host=host, port=port, log_level="warning")
 
 

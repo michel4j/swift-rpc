@@ -147,7 +147,7 @@
 
         .worker-spark-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
             gap: 0.75rem;
         }
 
@@ -319,13 +319,7 @@
                     </div>
                 </div>
                 <div class="col d-flex justify-content-end align-items-center gap-3 flex-wrap">
-                    <nav class="d-none d-lg-flex small">
-                        <a class="me-3 py-2 text-dark text-decoration-none"
-                           href="https://github.com/michel4j/swift-rpc/blob/master/README.md">Docs</a>
-                        <a class="me-3 py-2 text-dark text-decoration-none" href="https://github.com/michel4j/swift-rpc">Source</a>
-                        <a class="me-3 py-2 text-dark text-decoration-none" href="https://pypi.org/project/szrpc/">Releases</a>
-                        <a class="py-2 text-dark text-decoration-none" href="https://github.com/michel4j/swift-rpc/issues">Issues</a>
-                    </nav>
+
                 </div>
             </div>
 
@@ -388,18 +382,18 @@
     <!-- Telemetry & Task Duration Plots -->
     <div class="row g-3 mb-4">
         <div class="col-12">
-            <div class="card shadow-sm" id="worker-sparklines-card">
+            <div class="card" id="worker-sparklines-card">
                 <div class="card-header py-2 d-flex justify-content-between align-items-center">
                     <span class="fw-semibold">Workers</span>
                     <small class="text-secondary window-label">15m</small>
                 </div>
-                <div class="card-body p-3">
-                    <div id="worker-sparklines" class="worker-spark-grid"></div>
+                <div class="card-body p-0">
+                    <div id="worker-sparklines" class="worker-spark-grid mt-2"></div>
                 </div>
             </div>
         </div>
         <div class="col-12">
-            <div class="card shadow-sm">
+            <div class="card">
                 <div class="card-header py-2 d-flex justify-content-between align-items-center">
                     <span class="fw-semibold" id="duration-table-title">Task Summary</span>
                     <small class="text-secondary window-label">15m</small>
@@ -428,44 +422,64 @@
     </div>
 
     <!-- Active & Historical Calls -->
+
     <div class="row align-items-center mb-2 g-2">
-        <div class="col-auto lead">Call History</div>
-        <div class="col-auto ms-auto d-flex gap-2 flex-wrap">
-            <select id="filter-status" class="form-select form-select-sm" style="width: auto;">
-                <option value="">All Statuses</option>
-                <option value="DONE">DONE</option>
-                <option value="ERROR">ERROR</option>
-                <option value="ACTIVE">ACTIVE</option>
-            </select>
-            <input id="filter-method" type="text" class="form-control form-control-sm" placeholder="Filter method..." style="width: 160px;">
-            <input id="filter-worker" type="text" class="form-control form-control-sm" placeholder="Filter worker..." style="width: 160px;">
+        <div class="card">
+            <div class="card-header d-flex flex-row align-items-center gap-2 flex-wrap">
+                <span class="fw-semibold" id="call-history-title">Call History</span>
+                <div class="ms-auto d-flex gap-2 flex-wrap">
+                    <select id="filter-status" class="form-select form-select-sm" style="width: auto;">
+                        <option value="">All Statuses</option>
+                        <option value="DONE">DONE</option>
+                        <option value="ERROR">ERROR</option>
+                        <option value="ACTIVE">ACTIVE</option>
+                    </select>
+                    <input id="filter-method" type="text" class="form-control form-control-sm" placeholder="Filter method..." style="width: 160px;">
+                    <input id="filter-worker" type="text" class="form-control form-control-sm" placeholder="Filter worker..." style="width: 160px;">
+                </div>
+            </div>
+            <div class="card-body p-2 table-responsive">
+                <table class="table table-sm small table-hover">
+                    <thead>
+                    <tr>
+                        <th>Time</th>
+                        <th>Task ID</th>
+                        <th>Task Type</th>
+                        <th>Worker</th>
+                        <th>Status</th>
+                        <th>Duration</th>
+                    </tr>
+                    </thead>
+                    <tbody id="active-calls-body"></tbody>
+                    <tbody id="historical-calls-body"></tbody>
+                </table>
+            </div>
+            <div class="card-footer">
+                <div class="d-flex justify-content-between align-items-center mb-4">
+                    <small class="text-secondary" id="calls-pagination-info">-</small>
+                    <div class="btn-group btn-group-sm">
+                        <button class="btn btn-outline-secondary" id="prev-page" disabled>Prev</button>
+                        <button class="btn btn-outline-secondary" id="next-page" disabled>Next</button>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
-    <div class="row mb-2">
-        <div class="col-12 table-responsive">
-            <table class="table table-sm small table-hover">
-                <thead>
-                <tr>
-                    <th>Time</th>
-                    <th>Task ID</th>
-                    <th>Task Type</th>
-                    <th>Worker</th>
-                    <th>Status</th>
-                    <th>Duration</th>
-                </tr>
-                </thead>
-                <tbody id="active-calls-body"></tbody>
-                <tbody id="historical-calls-body"></tbody>
-            </table>
-        </div>
-    </div>
-    <div class="d-flex justify-content-between align-items-center mb-4">
-        <small class="text-secondary" id="calls-pagination-info">-</small>
-        <div class="btn-group btn-group-sm">
-            <button class="btn btn-outline-secondary" id="prev-page" disabled>Prev</button>
-            <button class="btn btn-outline-secondary" id="next-page" disabled>Next</button>
-        </div>
-    </div>
+
+        <footer>
+            <div class="row">
+                <div class="col">
+                    <nav class="d-none d-lg-flex small">
+                        <a class="me-3 py-2 text-dark text-decoration-none"
+                           href="https://github.com/michel4j/swift-rpc/blob/master/README.md">Docs</a>
+                        <a class="me-3 py-2 text-dark text-decoration-none" href="https://github.com/michel4j/swift-rpc">Source</a>
+                        <a class="me-3 py-2 text-dark text-decoration-none" href="https://pypi.org/project/szrpc/">Releases</a>
+                        <a class="py-2 text-dark text-decoration-none" href="https://github.com/michel4j/swift-rpc/issues">Issues</a>
+                    </nav>
+                </div>
+            </div>
+        </footer>
+
     </div>
 
     <!-- Modal -->
@@ -714,9 +728,13 @@
             const items = [
                 ['frontend', data.frontend || ''],
                 ['backend', data.backend || ''],
-                ['methods', (data.methods || []).join(', ')],
+                ['publish', data.publish || ''],
+                ['subscribe', data.subscribe || ''],
             ];
             serverInfo.replaceChildren(...items.map(([k, v]) => {
+                if (v === '') {
+                    return '';
+                }
                 const wrap = document.createElement('div');
                 wrap.append(`${k}: `);
                 const span = document.createElement('span');
