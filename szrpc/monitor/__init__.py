@@ -369,13 +369,6 @@ def create_app(monitor: Monitor) -> FastAPI:
     for spa_route in SPA_ROUTES:
         app.add_api_route(spa_route, index, methods=["GET"])
 
-    @app.get("/sparklines.js")
-    async def sparklines_js():
-        return FileResponse(
-            DATA_DIR / "sparklines.js",
-            media_type="text/javascript",
-        )
-
     return app
 
 

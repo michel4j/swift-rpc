@@ -148,9 +148,14 @@ def test_sqlite_store_persistence_and_windowed_queries(tmp_path):
         assert 'cdn.jsdelivr.net' not in html.lower()
         assert 'chart.js' not in html.lower()
 
-        sparklines_resp = asyncio.run(routes['/sparklines.js']())
-        assert sparklines_resp.media_type == 'text/javascript'
-        sparklines_js = sparklines_resp.path.read_text(encoding='utf-8')
+        assert '/sparklines.js' not in routes
+        static_mount = next(r for r in app.routes if getattr(r, 'path', None) == '/static')
+        sparklines_resp = asyncio.run(
+            static_mount.app.get_response('sparklines.js', {'type': 'http', 'method': 'GET', 'headers': []})
+        )
+        assert sparklines_resp.status_code == 200
+        assert 'javascript' in (sparklines_resp.media_type or '')
+        sparklines_js = (mon_mod.DATA_DIR / 'sparklines.js').read_text(encoding='utf-8')
         assert 'export function updateWorkerSparklines' in sparklines_js
 
         # Retention pruning removes expired rows
@@ -357,6 +362,9 @@ def test_sqlite_store_retries_transient_lock(tmp_path):
 
 def test_monitor_static_assets_and_spa_routes():
     import asyncio
+    import re
+    from starlette.exceptions import HTTPException as StarletteHTTPException
+
     mon_mod = pytest.importorskip('szrpc.monitor')
 
     monitor = mon_mod.Monitor(service_info={'description': 'Static', 'methods': ()})
@@ -364,10 +372,19 @@ def test_monitor_static_assets_and_spa_routes():
         app = mon_mod.create_app(monitor)
         routes = {r.path: r.endpoint for r in app.routes if hasattr(r, 'endpoint')}
 
+        # All 4 SPA routes serve monitor.html with folded-hover shell & zero external CDNs
         for path in ('/', '/workers', '/methods', '/requests'):
             assert path in routes
             resp = asyncio.run(routes[path]())
             assert resp.path == mon_mod.DATA_DIR / 'monitor.html'
+            html = resp.path.read_text(encoding='utf-8')
+            assert 'data-bs-sidebar="folded-hover"' in html
+            assert '/static/js/app.js' in html
+            assert '/static/vendor/tabler.min.css' in html
+            assert 'cdn.jsdelivr.net' not in html.lower()
+            for tag in re.findall(r'<(?:link|script)\b[^>]*>', html, flags=re.IGNORECASE):
+                assert 'http://' not in tag.lower(), tag
+                assert 'https://' not in tag.lower(), tag
 
         static_mount = next(r for r in app.routes if getattr(r, 'path', None) == '/static')
         static_app = static_mount.app
@@ -392,12 +409,65 @@ def test_monitor_static_assets_and_spa_routes():
             assert resp.status_code == 200, asset
             assert expected_ct in (resp.media_type or '')
 
-        from starlette.exceptions import HTTPException as StarletteHTTPException
-
         with pytest.raises(StarletteHTTPException) as exc_info:
             asyncio.run(static_app.get_response('vendor/tabler.min.css.map', {'type': 'http', 'method': 'GET', 'headers': []}))
         assert exc_info.value.status_code == 404
 
         assert '/api/does-not-exist' not in routes
+        assert '/sparklines.js' not in routes
+
+        async def _asgi_status(path: str) -> int:
+            status_code = 0
+
+            async def receive():
+                return {'type': 'http.request', 'body': b'', 'more_body': False}
+
+            async def send(message):
+                nonlocal status_code
+                if message['type'] == 'http.response.start':
+                    status_code = message['status']
+
+            scope = {
+                'type': 'http',
+                'asgi': {'version': '3.0'},
+                'http_version': '1.1',
+                'method': 'GET',
+                'scheme': 'http',
+                'path': path,
+                'raw_path': path.encode('ascii'),
+                'query_string': b'',
+                'headers': [],
+                'client': ('127.0.0.1', 12345),
+                'server': ('testserver', 80),
+            }
+            await app(scope, receive, send)
+            return status_code
+
+        assert asyncio.run(_asgi_status('/api/does-not-exist')) == 404
+        assert asyncio.run(_asgi_status('/sparklines.js')) == 404
+        assert asyncio.run(_asgi_status('/static/vendor/tabler.min.css.map')) == 404
+
+        # Total raw static asset footprint must remain strictly < 1 MiB
+        total_raw_bytes = sum(p.stat().st_size for p in mon_mod.DATA_DIR.rglob('*') if p.is_file())
+        assert total_raw_bytes < 1024 * 1024, f'Monitor static assets exceed 1 MiB: {total_raw_bytes} B'
     finally:
         monitor.close()
+
+
+def test_monitor_js_unit_tests():
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    node_bin = shutil.which('node')
+    if node_bin is None:
+        pytest.skip('node not found')
+
+    js_test = Path(__file__).parent / 'js' / 'monitor.test.mjs'
+    result = subprocess.run(
+        [node_bin, '--test', str(js_test)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, f'node --test failed:\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}'
