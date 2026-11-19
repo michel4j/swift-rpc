@@ -2,7 +2,7 @@
 from szrpc import log
 from szrpc.server import ServiceFactory, WorkerManager
 
-from test_server import MyService
+from .server import MyService
 
 if __name__ == '__main__':
 
