@@ -246,8 +246,8 @@ function buildShellHtml(win) {
               </a>
             </div>
           </div>
-          <div data-overview-top-methods>
-            <div class="card-body text-secondary small">Loading Method summary…</div>
+          <div data-overview-top-methods class="small">
+            <div class="card-body text-secondary">Loading Method summary…</div>
           </div>
         </div>
       </div>
@@ -265,8 +265,8 @@ function buildShellHtml(win) {
               </a>
             </div>
           </div>
-          <div data-overview-active-requests>
-            <div class="card-body text-secondary small">Loading active Requests…</div>
+          <div data-overview-active-requests class="small">
+            <div class="card-body text-secondary">Loading active Requests…</div>
           </div>
         </div>
 
@@ -282,8 +282,8 @@ function buildShellHtml(win) {
               </a>
             </div>
           </div>
-          <div data-overview-recent-failures>
-            <div class="card-body text-secondary small">Loading recent failures…</div>
+          <div data-overview-recent-failures class="small">
+            <div class="card-body text-secondary">Loading recent failures…</div>
           </div>
         </div>
       </div>
@@ -546,7 +546,7 @@ function patchActiveRequests(data, win) {
   }).join('');
 
   els.activeRequestsBody.innerHTML = `
-    <div class="list-group list-group-flush list-group-hoverable">
+    <div class="list-group list-group-flush list-group-hoverable overflow-auto" style="max-height: 300px;">
       ${itemsHtml}
     </div>
   `;
