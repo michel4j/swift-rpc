@@ -120,22 +120,25 @@ def test_worker_identity_lease_specialized_methods_order_independent(tmp_path):
         lb2.release()
 
 
-def _hold_lease_subprocess(lock_dir_str: str, ready_queue, stop_event) -> None:
+def _hold_lease_subprocess(lock_dir_str: str, ready_queue, stop_conn) -> None:
     lease = WorkerIdentityLease.acquire(
         'SubprocService', 'tcp://localhost:9991', host='NODE1', lock_dir=lock_dir_str
     )
     ready_queue.put(lease.name)
-    stop_event.wait(timeout=15)
-    lease.release()
+    try:
+        stop_conn.poll(15)
+    finally:
+        stop_conn.close()
+        lease.release()
 
 
 def test_worker_identity_lease_multiprocess_and_crash_recovery(tmp_path):
     ctx = multiprocessing.get_context('spawn')
     ready_q = ctx.Queue()
-    stops = [ctx.Event() for _ in range(3)]
+    pipes = [ctx.Pipe(duplex=False) for _ in range(3)]
     procs = [
-        ctx.Process(target=_hold_lease_subprocess, args=(str(tmp_path), ready_q, stops[i]))
-        for i in range(3)
+        ctx.Process(target=_hold_lease_subprocess, args=(str(tmp_path), ready_q, r_conn))
+        for r_conn, _ in pipes
     ]
 
     names = []
@@ -160,12 +163,18 @@ def test_worker_identity_lease_multiprocess_and_crash_recovery(tmp_path):
         finally:
             reclaimed.release()
     finally:
-        for ev in stops:
-            ev.set()
+        for r_conn, w_conn in pipes:
+            try:
+                w_conn.send(True)
+            except OSError:
+                pass
+            w_conn.close()
+            r_conn.close()
         for p in procs:
+            p.join(timeout=5)
             if p.is_alive():
                 p.terminate()
-            p.join(timeout=5)
+                p.join(timeout=5)
 
 
 def test_zmq_worker_restart_preserves_identity_and_handover(monkeypatch, tmp_path):
