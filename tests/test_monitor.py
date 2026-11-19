@@ -454,6 +454,41 @@ def test_monitor_static_assets_and_spa_routes():
         monitor.close()
 
 
+def test_get_calls_excludes_active_rows_for_unfiltered_pagination():
+    import asyncio
+
+    mon_mod = pytest.importorskip('szrpc.monitor')
+    monitor = mon_mod.Monitor(service_info={'description': 'Paging', 'methods': ('ping_pong',)}, db_path=':memory:')
+    try:
+        for i in range(30):
+            monitor.record_request('w-1', 'c-1', f'done-{i}', 'ping_pong', {'i': i})
+            monitor.record_response('w-1', f'done-{i}', 'DONE' if i % 5 else 'ERROR', 'ok')
+        for i in range(10):
+            monitor.record_request('w-1', 'c-1', f'active-{i}', 'ping_pong', {'i': i})
+        monitor.flush()
+
+        app = mon_mod.create_app(monitor)
+        routes = {r.path: r.endpoint for r in app.routes if hasattr(r, 'endpoint')}
+
+        page1 = asyncio.run(routes['/api/calls'](window='15m', status=None, method=None, worker_id=None, limit=25, offset=0))
+        assert page1['total'] == 30
+        assert len(page1['calls']) == 25
+        assert all(c['status'] != 'ACTIVE' for c in page1['calls'])
+
+        page2 = asyncio.run(routes['/api/calls'](window='15m', status=None, method=None, worker_id=None, limit=25, offset=25))
+        assert page2['total'] == 30
+        assert len(page2['calls']) == 5
+        assert all(c['status'] != 'ACTIVE' for c in page2['calls'])
+
+        # Explicit status='ACTIVE' still works if requested directly
+        active_only = asyncio.run(routes['/api/calls'](window='15m', status='ACTIVE', method=None, worker_id=None, limit=25, offset=0))
+        assert active_only['total'] == 10
+        assert len(active_only['calls']) == 10
+        assert all(c['status'] == 'ACTIVE' for c in active_only['calls'])
+    finally:
+        monitor.close()
+
+
 def test_monitor_js_unit_tests():
     import shutil
     import subprocess

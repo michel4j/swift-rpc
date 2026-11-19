@@ -483,6 +483,8 @@ class SqliteMonitorStore:
                     query = query.where(self.CallRecord.start_time >= cutoff)
                 if status:
                     query = query.where(self.CallRecord.status == status)
+                else:
+                    query = query.where(self.CallRecord.status != 'ACTIVE')
                 if method:
                     query = query.where(self.CallRecord.method == method)
                 if worker_id:

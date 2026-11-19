@@ -3,7 +3,7 @@
  * Pure helpers are DOM-independent and cleanly importable under `node --test`.
  */
 
-export const REQUESTS_PAGE_SIZE = 25;
+export const REQUESTS_PAGE_SIZE = 15;
 
 const VALID_STATUS_FILTERS = new Set(['DONE', 'ERROR']);
 

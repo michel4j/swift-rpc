@@ -243,36 +243,8 @@ function buildShellHtml(win) {
         </div>
       </div>
     </div>
-
-    <div class="card mb-3 d-none" data-active-card>
-      <div class="card-status-top bg-primary"></div>
-      <div class="card-header">
-        <div class="d-flex align-items-center gap-2 min-w-0">
-          <span class="status-dot status-dot-animated bg-primary flex-shrink-0" aria-hidden="true"></span>
-          <h2 class="card-title mb-0">Active Requests</h2>
-          <span class="badge bg-blue-lt font-mono" data-active-count>0</span>
-        </div>
-        <div class="card-actions text-secondary small">Live</div>
-      </div>
-      <div class="table-responsive">
-        <table class="table table-vcenter table-hover card-table mb-0">
-          <thead>
-            <tr>
-              <th scope="col">Request ID</th>
-              <th scope="col">Method</th>
-              <th scope="col">Worker</th>
-              <th scope="col">Client</th>
-              <th scope="col" class="text-end">Elapsed</th>
-              <th scope="col" class="text-end">Updates</th>
-              <th scope="col" class="text-end">Sent</th>
-            </tr>
-          </thead>
-          <tbody data-active-tbody></tbody>
-        </table>
-      </div>
-    </div>
-
-    <div class="card">
+    
+    <div class="card mb-3">
       <div class="card-header d-flex flex-wrap align-items-center justify-content-between gap-2">
         <div class="d-flex align-items-center gap-2">
           <h2 class="card-title mb-0">Historical Requests</h2>
@@ -306,7 +278,7 @@ function buildShellHtml(win) {
         </div>
       </div>
 
-      <div class="table-responsive">
+      <div class="table-responsive small">
         <table class="table table-vcenter table-hover card-table mb-0">
           <thead>
             <tr>
@@ -331,6 +303,34 @@ function buildShellHtml(win) {
           <button type="button" class="btn btn-outline-secondary" data-page-prev disabled>Prev</button>
           <button type="button" class="btn btn-outline-secondary" data-page-next disabled>Next</button>
         </div>
+      </div>
+    </div>
+    
+    <div class="card mb-3 d-none" data-active-card>
+      <div class="card-status-top bg-primary"></div>
+      <div class="card-header">
+        <div class="d-flex align-items-center gap-2 min-w-0">
+          <span class="status-dot status-dot-animated bg-primary flex-shrink-0" aria-hidden="true"></span>
+          <h2 class="card-title mb-0">Active Requests</h2>
+          <span class="badge bg-blue-lt font-mono" data-active-count>0</span>
+        </div>
+        <div class="card-actions text-secondary small">Live</div>
+      </div>
+      <div class="table-responsive small">
+        <table class="table table-vcenter table-hover card-table mb-0">
+          <thead>
+            <tr>
+              <th scope="col">Request ID</th>
+              <th scope="col">Method</th>
+              <th scope="col">Worker</th>
+              <th scope="col">Client</th>
+              <th scope="col" class="text-end">Elapsed</th>
+              <th scope="col" class="text-end">Updates</th>
+              <th scope="col" class="text-end">Sent</th>
+            </tr>
+          </thead>
+          <tbody data-active-tbody></tbody>
+        </table>
       </div>
     </div>
   `;
