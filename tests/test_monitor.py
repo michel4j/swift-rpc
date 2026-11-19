@@ -157,3 +157,196 @@ def test_sqlite_store_persistence_and_windowed_queries(tmp_path):
         assert m2.store.WorkerMetric.select().where(m2.store.WorkerMetric.worker_id == 'w-old').count() == 0
     finally:
         m2.close()
+
+
+class OtherService(Service):
+    def remote__echo(self, request, val=1):
+        return val
+
+
+def test_default_db_path_per_service_and_port(monkeypatch, tmp_path):
+    mon_mod = pytest.importorskip('szrpc.monitor')
+    monkeypatch.setenv('XDG_DATA_HOME', str(tmp_path))
+
+    assert mon_mod.default_db_path() == tmp_path / 'szrpc' / 'monitor.db'
+    assert mon_mod.default_db_path('MyService', 9990) == tmp_path / 'szrpc' / 'monitor-myservice-9990.db'
+    assert mon_mod.default_db_path('My / Odd Service!', 9992) == tmp_path / 'szrpc' / 'monitor-my-odd-service-9992.db'
+    assert mon_mod.default_db_path(port=9995) == tmp_path / 'szrpc' / 'monitor-9995.db'
+
+
+def test_server_uses_distinct_default_db_paths_per_service_instance(monkeypatch, tmp_path):
+    mon_mod = pytest.importorskip('szrpc.monitor')
+    import szrpc.server as srv_mod
+
+    monkeypatch.setenv('XDG_DATA_HOME', str(tmp_path))
+    monkeypatch.setattr(mon_mod, 'start_monitor_thread', lambda monitor, port=8080: None)
+    monkeypatch.setattr(srv_mod.mon, 'start_monitor_thread', lambda monitor, port=8080: None)
+
+    net = InMemoryNetwork()
+    with (
+        Server(SampleService, ports=(9990, 9991), instances=0, transport=net.broker(), monitor_port=8080) as s1,
+        Server(SampleService, ports=(9992, 9993), instances=0, transport=net.broker(), monitor_port=8081) as s2,
+        Server(OtherService, ports=(9994, 9995), instances=0, transport=net.broker(), monitor_port=8082) as s3,
+    ):
+        assert s1.monitor.store.db_path == str(tmp_path / 'szrpc' / 'monitor-sampleservice-9990.db')
+        assert s2.monitor.store.db_path == str(tmp_path / 'szrpc' / 'monitor-sampleservice-9992.db')
+        assert s3.monitor.store.db_path == str(tmp_path / 'szrpc' / 'monitor-otherservice-9994.db')
+
+        s1.monitor.record_request('w-1', 'c-1', 'req-s1', 'ping_pong', {})
+        s1.monitor.record_response('w-1', 'req-s1', 'DONE', 'ok')
+        s2.monitor.record_request('w-2', 'c-2', 'req-s2', 'ping_pong', {})
+        s2.monitor.record_response('w-2', 'req-s2', 'DONE', 'ok')
+        s1.monitor.flush()
+        s2.monitor.flush()
+
+        assert s1.monitor.get_summary()['total_requests'] == 1
+        assert s1.monitor.get_calls()['calls'][0]['request_id'] == 'req-s1'
+        assert s2.monitor.get_summary()['total_requests'] == 1
+        assert s2.monitor.get_calls()['calls'][0]['request_id'] == 'req-s2'
+        assert s3.monitor.get_summary()['total_requests'] == 0
+
+
+def test_memory_monitor_store_persists_across_writer_thread():
+    mon_mod = pytest.importorskip('szrpc.monitor')
+    monitor = mon_mod.Monitor(service_info={'description': 'Mem', 'methods': ('ping_pong',)}, db_path=':memory:')
+    try:
+        monitor.record_request('w-1', 'c-1', 'req-mem-1', 'ping_pong', {'a': 1})
+        monitor.record_response('w-1', 'req-mem-1', 'DONE', 'pong')
+        monitor.update_worker('w-1', {'cpu_pct': 12.5, 'mem_rss': 1024, 'net_rx_bps': 1.0, 'net_tx_bps': 2.0, 'active_tasks': 1})
+        monitor.flush()
+
+        summary = monitor.get_summary(window='15m')
+        assert summary['total_requests'] == 1
+        assert monitor.get_calls()['total'] == 1
+        assert 'w-1' in monitor.get_worker_metrics(window='15m')['series']
+    finally:
+        monitor.close()
+
+
+def _concurrent_store_worker(db_path_str: str, worker_idx: int, count: int, start_barrier, err_queue) -> None:
+    try:
+        import time
+        from szrpc.monitor.store import SqliteMonitorStore
+
+        start_barrier.wait()
+        store = SqliteMonitorStore(db_path=db_path_str, flush_interval=0.05, batch_size=10)
+        try:
+            now = time.time()
+            for i in range(count):
+                req_id = f'proc-{worker_idx}-req-{i}'
+                store.enqueue_call({
+                    'request_id': req_id,
+                    'client_id': f'c-{worker_idx}',
+                    'method': f'm_{worker_idx}',
+                    'signature': '',
+                    'worker_id': f'w-{worker_idx}',
+                    'start_time': now,
+                    'end_time': now + 0.01,
+                    'duration': 0.01,
+                    'status': 'DONE',
+                    'sent_bytes': 16,
+                    'updates': 0,
+                    'kwargs_json': '{}',
+                    'results_json': '["ok"]',
+                })
+                store.enqueue_metric({
+                    'ts': now,
+                    'worker_id': f'w-{worker_idx}',
+                    'cpu_pct': float(worker_idx),
+                    'mem_rss': 1024,
+                    'net_rx_bps': 0.0,
+                    'net_tx_bps': 0.0,
+                    'active_tasks': 1,
+                })
+            store.flush(timeout=10.0)
+            store._prune_old()
+        finally:
+            store.close()
+    except BaseException as exc:
+        err_queue.put((worker_idx, repr(exc)))
+
+
+def test_sqlite_store_multiprocess_concurrent_writes(tmp_path):
+    import multiprocessing
+
+    mon_mod = pytest.importorskip('szrpc.monitor')
+    db_file = tmp_path / 'shared_monitor.db'
+    ctx = multiprocessing.get_context('spawn')
+    num_procs = 4
+    per_proc = 25
+    barrier = ctx.Barrier(num_procs)
+    err_queue = ctx.Queue()
+
+    procs = [
+        ctx.Process(target=_concurrent_store_worker, args=(str(db_file), idx, per_proc, barrier, err_queue))
+        for idx in range(num_procs)
+    ]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(timeout=30)
+        assert p.exitcode == 0
+
+    errors = []
+    while not err_queue.empty():
+        errors.append(err_queue.get_nowait())
+    assert errors == []
+
+    reader = mon_mod.SqliteMonitorStore(db_path=db_file)
+    try:
+        assert reader.get_summary(window='15m')['total_requests'] == num_procs * per_proc
+        assert reader.WorkerMetric.select().count() == num_procs * per_proc
+    finally:
+        reader.close()
+
+
+def test_sqlite_store_retries_transient_lock(tmp_path):
+    import sqlite3
+    import time
+    from threading import Event
+
+    mon_mod = pytest.importorskip('szrpc.monitor')
+    db_file = tmp_path / 'locked.db'
+
+    # Initialize DB first so WAL exists, then briefly hold an EXCLUSIVE lock from another connection
+    store = mon_mod.SqliteMonitorStore(db_path=db_file, flush_interval=0.05, busy_timeout_ms=50)
+    try:
+        locked = Event()
+
+        def _hold_lock():
+            blocker = sqlite3.connect(str(db_file), isolation_level=None)
+            try:
+                blocker.execute('BEGIN EXCLUSIVE')
+                locked.set()
+                time.sleep(0.15)
+                blocker.execute('ROLLBACK')
+            finally:
+                blocker.close()
+
+        holder = Thread(target=_hold_lock, daemon=True)
+        holder.start()
+        assert locked.wait(timeout=2)
+
+        now = time.time()
+        store._flush_batch(
+            calls=[{
+                'request_id': 'req-retry-1',
+                'client_id': 'c-1',
+                'method': 'ping',
+                'signature': '',
+                'worker_id': 'w-1',
+                'start_time': now,
+                'end_time': now + 0.01,
+                'duration': 0.01,
+                'status': 'DONE',
+                'sent_bytes': 4,
+                'updates': 0,
+                'kwargs_json': '{}',
+                'results_json': '["ok"]',
+            }],
+            metrics=[],
+        )
+        holder.join(timeout=2)
+        assert store.get_call_details('req-retry-1') is not None
+    finally:
+        store.close()

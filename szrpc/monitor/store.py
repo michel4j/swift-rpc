@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import queue
+import random
+import re
 import threading
 import time
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 from peewee import (
     Case,
@@ -16,10 +19,17 @@ from peewee import (
     FloatField,
     IntegerField,
     Model,
+    OperationalError,
     SqliteDatabase,
     TextField,
     fn,
 )
+
+from .. import log
+
+logger = log.get_module_logger(__name__)
+
+T = TypeVar('T')
 
 # window -> (duration_seconds, bucket_seconds)
 WINDOWS: dict[str, tuple[int, int]] = {
@@ -31,12 +41,30 @@ WINDOWS: dict[str, tuple[int, int]] = {
 }
 
 MAX_JSON_BYTES = 65536
+DEFAULT_BUSY_TIMEOUT_MS = 10000
+MAX_LOCK_RETRIES = 5
+RETRY_BASE_DELAY = 0.05
 
 
-def default_db_path() -> Path:
+def _slugify(value: str) -> str:
+    slug = re.sub(r'[^a-zA-Z0-9]+', '-', value.strip()).strip('-').lower()
+    return slug or 'service'
+
+
+def default_db_path(service_name: str | None = None, port: int | None = None) -> Path:
     """Return the default SQLite database path for monitor persistence."""
     base = Path(os.environ.get('XDG_DATA_HOME', Path.home() / '.local' / 'share'))
-    return base / 'szrpc' / 'monitor.db'
+    parts = ['monitor']
+    if service_name:
+        parts.append(_slugify(service_name))
+    if port is not None:
+        parts.append(str(port))
+    return base / 'szrpc' / f"{'-'.join(parts)}.db"
+
+
+def _is_lock_error(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return 'locked' in msg or 'busy' in msg
 
 
 def _safe_json(value: Any, max_bytes: int = MAX_JSON_BYTES) -> str:
@@ -100,38 +128,63 @@ class SqliteMonitorStore:
         retention_seconds: float = 7 * 86400,
         flush_interval: float = 0.5,
         batch_size: int = 100,
+        busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS,
     ):
         self.retention_seconds = retention_seconds
         self.flush_interval = flush_interval
         self.batch_size = batch_size
+        self.busy_timeout_ms = busy_timeout_ms
         self._is_memory = str(db_path) == ':memory:'
 
         if self._is_memory:
-            self._db = SqliteDatabase(':memory:', check_same_thread=False)
+            self._db = SqliteDatabase(':memory:', thread_safe=False, check_same_thread=False)
+            self._db_lock: Any = threading.RLock()
             self.db_path = ':memory:'
         else:
             path = Path(db_path) if db_path is not None else default_db_path()
             path.parent.mkdir(parents=True, exist_ok=True)
             self._db = SqliteDatabase(
                 str(path),
+                timeout=busy_timeout_ms / 1000.0,
                 pragmas={
+                    'busy_timeout': busy_timeout_ms,
                     'journal_mode': 'wal',
                     'synchronous': 'normal',
                     'cache_size': -16000,
                 },
                 check_same_thread=False,
             )
+            self._db_lock = contextlib.nullcontext()
             self.db_path = str(path)
 
-        self._db.connect(reuse_if_open=True)
         self.CallRecord, self.WorkerMetric = _make_models(self._db)
-        self._db.create_tables([self.CallRecord, self.WorkerMetric], safe=True)
+        self._run_with_lock_retry(self._init_schema)
 
         self._queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=10000)
         self._stop_event = threading.Event()
         self._last_prune = time.time()
         self._writer_thread = threading.Thread(target=self._writer_loop, daemon=True)
         self._writer_thread.start()
+
+    def _init_schema(self) -> None:
+        with self._db_lock:
+            self._db.connect(reuse_if_open=True)
+            self._db.create_tables([self.CallRecord, self.WorkerMetric], safe=True)
+
+    def _run_with_lock_retry(
+        self,
+        operation: Callable[[], T],
+        retries: int = MAX_LOCK_RETRIES,
+        base_delay: float = RETRY_BASE_DELAY,
+    ) -> T:
+        for attempt in range(retries + 1):
+            try:
+                return operation()
+            except OperationalError as exc:
+                if not _is_lock_error(exc) or attempt >= retries:
+                    raise
+                time.sleep(base_delay * (2**attempt) + random.uniform(0, base_delay))
+        raise RuntimeError('Unreachable retry state')
 
     def enqueue_call(self, row: dict[str, Any]) -> None:
         """Queue a call record upsert without blocking the caller."""
@@ -152,7 +205,10 @@ class SqliteMonitorStore:
         if self._stop_event.is_set():
             return
         done = threading.Event()
-        self._queue.put(('flush', done))
+        try:
+            self._queue.put(('flush', done), timeout=timeout)
+        except queue.Full:
+            return
         done.wait(timeout=timeout)
 
     def close(self) -> None:
@@ -161,11 +217,15 @@ class SqliteMonitorStore:
             return
         self.flush(timeout=2.0)
         self._stop_event.set()
-        self._queue.put(('stop', None))
+        try:
+            self._queue.put_nowait(('stop', None))
+        except queue.Full:
+            pass
         if self._writer_thread.is_alive():
             self._writer_thread.join(timeout=2.0)
-        if not self._db.is_closed():
-            self._db.close()
+        with self._db_lock:
+            if not self._db.is_closed():
+                self._db.close()
 
     def _flush_batch(self, calls: list[dict[str, Any]], metrics: list[dict[str, Any]]) -> None:
         if not calls and not metrics:
@@ -175,68 +235,79 @@ class SqliteMonitorStore:
         for row in calls:
             deduped_calls[row['request_id']] = row
 
-        with self._db.atomic():
-            if deduped_calls:
-                self.CallRecord.insert_many(list(deduped_calls.values())).on_conflict_replace().execute()
-            if metrics:
-                self.WorkerMetric.insert_many(metrics).execute()
+        def _write() -> None:
+            with self._db_lock, self._db.atomic(lock_type='IMMEDIATE'):
+                if deduped_calls:
+                    self.CallRecord.insert_many(list(deduped_calls.values())).on_conflict_replace().execute()
+                if metrics:
+                    self.WorkerMetric.insert_many(metrics).execute()
+
+        self._run_with_lock_retry(_write)
 
     def _prune_old(self) -> None:
         if self.retention_seconds <= 0:
             return
         cutoff = time.time() - self.retention_seconds
-        with self._db.atomic():
-            self.WorkerMetric.delete().where(self.WorkerMetric.ts < cutoff).execute()
-            self.CallRecord.delete().where(self.CallRecord.start_time < cutoff).execute()
+
+        def _delete() -> None:
+            with self._db_lock, self._db.atomic(lock_type='IMMEDIATE'):
+                self.WorkerMetric.delete().where(self.WorkerMetric.ts < cutoff).execute()
+                self.CallRecord.delete().where(self.CallRecord.start_time < cutoff).execute()
+
+        self._run_with_lock_retry(_delete)
 
     def _writer_loop(self) -> None:
-        while not self._stop_event.is_set():
-            calls: list[dict[str, Any]] = []
-            metrics: list[dict[str, Any]] = []
-            flush_events: list[threading.Event] = []
-            should_stop = False
+        try:
+            while not self._stop_event.is_set():
+                calls: list[dict[str, Any]] = []
+                metrics: list[dict[str, Any]] = []
+                flush_events: list[threading.Event] = []
+                should_stop = False
 
-            try:
-                kind, payload = self._queue.get(timeout=self.flush_interval)
-                items = [(kind, payload)]
-            except queue.Empty:
-                items = []
-
-            while len(items) < self.batch_size:
                 try:
-                    items.append(self._queue.get_nowait())
+                    kind, payload = self._queue.get(timeout=self.flush_interval)
+                    items = [(kind, payload)]
                 except queue.Empty:
+                    items = []
+
+                while len(items) < self.batch_size:
+                    try:
+                        items.append(self._queue.get_nowait())
+                    except queue.Empty:
+                        break
+
+                for kind, payload in items:
+                    if kind == 'call':
+                        calls.append(payload)
+                    elif kind == 'metric':
+                        metrics.append(payload)
+                    elif kind == 'flush':
+                        flush_events.append(payload)
+                    elif kind == 'stop':
+                        should_stop = True
+
+                if calls or metrics:
+                    try:
+                        self._flush_batch(calls, metrics)
+                    except Exception as exc:
+                        logger.warning(f"Monitor store flush failed: {exc}")
+
+                now = time.time()
+                if now - self._last_prune >= 60.0:
+                    try:
+                        self._prune_old()
+                    except Exception as exc:
+                        logger.warning(f"Monitor store prune failed: {exc}")
+                    self._last_prune = now
+
+                for ev in flush_events:
+                    ev.set()
+
+                if should_stop:
                     break
-
-            for kind, payload in items:
-                if kind == 'call':
-                    calls.append(payload)
-                elif kind == 'metric':
-                    metrics.append(payload)
-                elif kind == 'flush':
-                    flush_events.append(payload)
-                elif kind == 'stop':
-                    should_stop = True
-
-            if calls or metrics:
-                try:
-                    self._flush_batch(calls, metrics)
-                except Exception:
-                    pass
-
-            now = time.time()
-            if now - self._last_prune >= 60.0:
-                try:
-                    self._prune_old()
-                except Exception:
-                    pass
-                self._last_prune = now
-
-            for ev in flush_events:
-                ev.set()
-
-            if should_stop:
-                break
+        finally:
+            if not self._is_memory and not self._db.is_closed():
+                self._db.close()
 
     def get_worker_metrics(self, window: str = '15m', worker_id: str | None = None) -> dict[str, Any]:
         """Return time-bucketed CPU, memory, network, and active task series per worker."""
@@ -244,37 +315,40 @@ class SqliteMonitorStore:
         cutoff = time.time() - duration
         bucket_expr = ((self.WorkerMetric.ts / bucket).cast('INTEGER') * bucket).alias('bucket')
 
-        query = (
-            self.WorkerMetric.select(
-                bucket_expr,
-                self.WorkerMetric.worker_id,
-                fn.AVG(self.WorkerMetric.cpu_pct).alias('cpu_pct'),
-                fn.AVG(self.WorkerMetric.mem_rss).alias('mem_rss'),
-                fn.AVG(self.WorkerMetric.net_rx_bps).alias('net_rx_bps'),
-                fn.AVG(self.WorkerMetric.net_tx_bps).alias('net_tx_bps'),
-                fn.MAX(self.WorkerMetric.active_tasks).alias('active_tasks'),
-            )
-            .where(self.WorkerMetric.ts >= cutoff)
-        )
-        if worker_id:
-            query = query.where(self.WorkerMetric.worker_id == worker_id)
-        query = query.group_by(self.WorkerMetric.worker_id, bucket_expr).order_by(bucket_expr.asc())
+        def _query() -> dict[str, list[dict[str, Any]]]:
+            with self._db_lock:
+                query = (
+                    self.WorkerMetric.select(
+                        bucket_expr,
+                        self.WorkerMetric.worker_id,
+                        fn.AVG(self.WorkerMetric.cpu_pct).alias('cpu_pct'),
+                        fn.AVG(self.WorkerMetric.mem_rss).alias('mem_rss'),
+                        fn.AVG(self.WorkerMetric.net_rx_bps).alias('net_rx_bps'),
+                        fn.AVG(self.WorkerMetric.net_tx_bps).alias('net_tx_bps'),
+                        fn.MAX(self.WorkerMetric.active_tasks).alias('active_tasks'),
+                    )
+                    .where(self.WorkerMetric.ts >= cutoff)
+                )
+                if worker_id:
+                    query = query.where(self.WorkerMetric.worker_id == worker_id)
+                query = query.group_by(self.WorkerMetric.worker_id, bucket_expr).order_by(bucket_expr.asc())
 
-        series: dict[str, list[dict[str, Any]]] = defaultdict(list)
-        for row in query.dicts():
-            series[row['worker_id']].append({
-                'ts': row['bucket'],
-                'cpu_pct': round(float(row['cpu_pct'] or 0.0), 2),
-                'mem_rss': int(row['mem_rss'] or 0),
-                'net_rx_bps': round(float(row['net_rx_bps'] or 0.0), 1),
-                'net_tx_bps': round(float(row['net_tx_bps'] or 0.0), 1),
-                'active_tasks': int(row['active_tasks'] or 0),
-            })
+                series: dict[str, list[dict[str, Any]]] = defaultdict(list)
+                for row in query.dicts():
+                    series[row['worker_id']].append({
+                        'ts': row['bucket'],
+                        'cpu_pct': round(float(row['cpu_pct'] or 0.0), 2),
+                        'mem_rss': int(row['mem_rss'] or 0),
+                        'net_rx_bps': round(float(row['net_rx_bps'] or 0.0), 1),
+                        'net_tx_bps': round(float(row['net_tx_bps'] or 0.0), 1),
+                        'active_tasks': int(row['active_tasks'] or 0),
+                    })
+                return dict(series)
 
         return {
             'window': window if window in WINDOWS else '15m',
             'bucket_seconds': bucket,
-            'series': dict(series),
+            'series': self._run_with_lock_retry(_query),
         }
 
     def get_worker_tasks(
@@ -287,42 +361,45 @@ class SqliteMonitorStore:
         duration, _ = WINDOWS.get(window, WINDOWS['15m'])
         cutoff = time.time() - duration
 
-        query = (
-            self.CallRecord.select(
-                self.CallRecord.worker_id,
-                self.CallRecord.method,
-                self.CallRecord.duration,
-                self.CallRecord.status,
-                self.CallRecord.end_time,
-            )
-            .where(
-                (self.CallRecord.start_time >= cutoff)
-                & (self.CallRecord.status.in_(['DONE', 'ERROR']))
-                & (self.CallRecord.duration.is_null(False))
-            )
-            .order_by(self.CallRecord.start_time.desc())
-        )
-        if worker_id:
-            query = query.where(self.CallRecord.worker_id == worker_id)
+        def _query() -> dict[str, list[dict[str, Any]]]:
+            with self._db_lock:
+                query = (
+                    self.CallRecord.select(
+                        self.CallRecord.worker_id,
+                        self.CallRecord.method,
+                        self.CallRecord.duration,
+                        self.CallRecord.status,
+                        self.CallRecord.end_time,
+                    )
+                    .where(
+                        (self.CallRecord.start_time >= cutoff)
+                        & (self.CallRecord.status.in_(['DONE', 'ERROR']))
+                        & (self.CallRecord.duration.is_null(False))
+                    )
+                    .order_by(self.CallRecord.start_time.desc())
+                )
+                if worker_id:
+                    query = query.where(self.CallRecord.worker_id == worker_id)
 
-        tasks_by_worker: dict[str, list[dict[str, Any]]] = defaultdict(list)
-        for row in query.dicts():
-            wid = row['worker_id']
-            bucket = tasks_by_worker[wid]
-            if len(bucket) < limit_per_worker:
-                bucket.append({
-                    'method': row['method'],
-                    'duration': round(float(row['duration'] or 0.0), 4),
-                    'status': row['status'],
-                    'end_time': row['end_time'],
-                })
+                tasks_by_worker: dict[str, list[dict[str, Any]]] = defaultdict(list)
+                for row in query.dicts():
+                    wid = row['worker_id']
+                    bucket = tasks_by_worker[wid]
+                    if len(bucket) < limit_per_worker:
+                        bucket.append({
+                            'method': row['method'],
+                            'duration': round(float(row['duration'] or 0.0), 4),
+                            'status': row['status'],
+                            'end_time': row['end_time'],
+                        })
 
-        for bucket in tasks_by_worker.values():
-            bucket.reverse()
+                for bucket in tasks_by_worker.values():
+                    bucket.reverse()
+                return dict(tasks_by_worker)
 
         return {
             'window': window if window in WINDOWS else '15m',
-            'tasks': dict(tasks_by_worker),
+            'tasks': self._run_with_lock_retry(_query),
         }
 
     def get_summary(self, window: str = '15m') -> dict[str, Any]:
@@ -330,53 +407,57 @@ class SqliteMonitorStore:
         duration, _ = WINDOWS.get(window, WINDOWS['15m'])
         cutoff = time.time() - duration
 
-        agg_query = (
-            self.CallRecord.select(
-                self.CallRecord.method,
-                fn.COUNT(self.CallRecord.request_id).alias('count'),
-                fn.SUM(Case(None, ((self.CallRecord.status == 'ERROR', 1),), 0)).alias('errors'),
-                fn.AVG(self.CallRecord.duration).alias('avg_duration'),
-                fn.MAX(self.CallRecord.duration).alias('max_duration'),
-                fn.MIN(self.CallRecord.duration).alias('min_duration'),
-                fn.SUM(self.CallRecord.sent_bytes).alias('total_bytes'),
-            )
-            .where(self.CallRecord.start_time >= cutoff)
-            .group_by(self.CallRecord.method)
-            .order_by(fn.COUNT(self.CallRecord.request_id).desc())
-        )
+        def _query() -> tuple[int, int, list[dict[str, Any]]]:
+            with self._db_lock:
+                agg_query = (
+                    self.CallRecord.select(
+                        self.CallRecord.method,
+                        fn.COUNT(self.CallRecord.request_id).alias('count'),
+                        fn.SUM(Case(None, ((self.CallRecord.status == 'ERROR', 1),), 0)).alias('errors'),
+                        fn.AVG(self.CallRecord.duration).alias('avg_duration'),
+                        fn.MAX(self.CallRecord.duration).alias('max_duration'),
+                        fn.MIN(self.CallRecord.duration).alias('min_duration'),
+                        fn.SUM(self.CallRecord.sent_bytes).alias('total_bytes'),
+                    )
+                    .where(self.CallRecord.start_time >= cutoff)
+                    .group_by(self.CallRecord.method)
+                    .order_by(fn.COUNT(self.CallRecord.request_id).desc())
+                )
 
-        # Gather sorted durations per method for p95 calculation
-        durations_by_method: dict[str, list[float]] = defaultdict(list)
-        dur_query = (
-            self.CallRecord.select(self.CallRecord.method, self.CallRecord.duration)
-            .where((self.CallRecord.start_time >= cutoff) & (self.CallRecord.duration.is_null(False)))
-            .order_by(self.CallRecord.duration.asc())
-        )
-        for row in dur_query.dicts():
-            durations_by_method[row['method']].append(float(row['duration']))
+                # Gather sorted durations per method for p95 calculation
+                durations_by_method: dict[str, list[float]] = defaultdict(list)
+                dur_query = (
+                    self.CallRecord.select(self.CallRecord.method, self.CallRecord.duration)
+                    .where((self.CallRecord.start_time >= cutoff) & (self.CallRecord.duration.is_null(False)))
+                    .order_by(self.CallRecord.duration.asc())
+                )
+                for row in dur_query.dicts():
+                    durations_by_method[row['method']].append(float(row['duration']))
 
-        methods: list[dict[str, Any]] = []
-        total_requests = 0
-        total_errors = 0
-        for row in agg_query.dicts():
-            m = row['method']
-            cnt = int(row['count'] or 0)
-            errs = int(row['errors'] or 0)
-            total_requests += cnt
-            total_errors += errs
-            durs = durations_by_method.get(m, [])
-            p95 = durs[min(len(durs) - 1, int(0.95 * len(durs)))] if durs else 0.0
-            methods.append({
-                'method': m,
-                'count': cnt,
-                'errors': errs,
-                'avg_duration': round(float(row['avg_duration'] or 0.0), 4),
-                'p95_duration': round(float(p95), 4),
-                'max_duration': round(float(row['max_duration'] or 0.0), 4),
-                'min_duration': round(float(row['min_duration'] or 0.0), 4),
-                'total_bytes': int(row['total_bytes'] or 0),
-            })
+                methods: list[dict[str, Any]] = []
+                total_requests = 0
+                total_errors = 0
+                for row in agg_query.dicts():
+                    m = row['method']
+                    cnt = int(row['count'] or 0)
+                    errs = int(row['errors'] or 0)
+                    total_requests += cnt
+                    total_errors += errs
+                    durs = durations_by_method.get(m, [])
+                    p95 = durs[min(len(durs) - 1, int(0.95 * len(durs)))] if durs else 0.0
+                    methods.append({
+                        'method': m,
+                        'count': cnt,
+                        'errors': errs,
+                        'avg_duration': round(float(row['avg_duration'] or 0.0), 4),
+                        'p95_duration': round(float(p95), 4),
+                        'max_duration': round(float(row['max_duration'] or 0.0), 4),
+                        'min_duration': round(float(row['min_duration'] or 0.0), 4),
+                        'total_bytes': int(row['total_bytes'] or 0),
+                    })
+                return total_requests, total_errors, methods
 
+        total_requests, total_errors, methods = self._run_with_lock_retry(_query)
         return {
             'window': window if window in WINDOWS else '15m',
             'total_requests': total_requests,
@@ -394,58 +475,66 @@ class SqliteMonitorStore:
         offset: int = 0,
     ) -> dict[str, Any]:
         """Return paginated and filtered call records ordered newest-first."""
-        query = self.CallRecord.select()
-        if window and window in WINDOWS:
-            cutoff = time.time() - WINDOWS[window][0]
-            query = query.where(self.CallRecord.start_time >= cutoff)
-        if status:
-            query = query.where(self.CallRecord.status == status)
-        if method:
-            query = query.where(self.CallRecord.method == method)
-        if worker_id:
-            query = query.where(self.CallRecord.worker_id == worker_id)
+        def _query() -> tuple[int, list[dict[str, Any]]]:
+            with self._db_lock:
+                query = self.CallRecord.select()
+                if window and window in WINDOWS:
+                    cutoff = time.time() - WINDOWS[window][0]
+                    query = query.where(self.CallRecord.start_time >= cutoff)
+                if status:
+                    query = query.where(self.CallRecord.status == status)
+                if method:
+                    query = query.where(self.CallRecord.method == method)
+                if worker_id:
+                    query = query.where(self.CallRecord.worker_id == worker_id)
 
-        total = query.count()
-        rows = query.order_by(self.CallRecord.start_time.desc()).limit(limit).offset(offset)
+                total = query.count()
+                rows = query.order_by(self.CallRecord.start_time.desc()).limit(limit).offset(offset)
 
-        calls = []
-        for rec in rows:
-            dt = datetime.fromtimestamp(rec.start_time).astimezone()
-            calls.append({
-                'request_id': rec.request_id,
-                'client_id': rec.client_id,
-                'method': f'{rec.method}({rec.signature})',
-                'raw_method': rec.method,
-                'worker_id': rec.worker_id,
-                'date_time': dt.strftime('%Y-%m-%d %H:%M:%S %Z'),
-                'start_time': rec.start_time,
-                'end_time': rec.end_time,
-                'duration': rec.duration,
-                'status': rec.status,
-                'sent_bytes': rec.sent_bytes,
-                'updates': rec.updates,
-            })
+                calls = []
+                for rec in rows:
+                    dt = datetime.fromtimestamp(rec.start_time).astimezone()
+                    calls.append({
+                        'request_id': rec.request_id,
+                        'client_id': rec.client_id,
+                        'method': f'{rec.method}({rec.signature})',
+                        'raw_method': rec.method,
+                        'worker_id': rec.worker_id,
+                        'date_time': dt.strftime('%Y-%m-%d %H:%M:%S %Z'),
+                        'start_time': rec.start_time,
+                        'end_time': rec.end_time,
+                        'duration': rec.duration,
+                        'status': rec.status,
+                        'sent_bytes': rec.sent_bytes,
+                        'updates': rec.updates,
+                    })
+                return total, calls
 
+        total, calls = self._run_with_lock_retry(_query)
         return {'total': total, 'limit': limit, 'offset': offset, 'calls': calls}
 
     def get_call_details(self, request_id: str) -> dict[str, Any] | None:
         """Fetch full call details including kwargs and results from SQLite."""
-        rec = self.CallRecord.get_or_none(self.CallRecord.request_id == request_id)
-        if rec is None:
-            return None
-        dt = datetime.fromtimestamp(rec.start_time).astimezone()
-        return {
-            'request_id': rec.request_id,
-            'client_id': rec.client_id,
-            'method': f'{rec.method}({rec.signature})',
-            'worker_id': rec.worker_id,
-            'date_time': dt.strftime('%Y-%m-%d %H:%M:%S %Z'),
-            'start_time': rec.start_time,
-            'end_time': rec.end_time,
-            'duration': rec.duration,
-            'status': rec.status,
-            'sent_bytes': rec.sent_bytes,
-            'updates': rec.updates,
-            'kwargs': json.loads(rec.kwargs_json),
-            'results': json.loads(rec.results_json),
-        }
+        def _query() -> dict[str, Any] | None:
+            with self._db_lock:
+                rec = self.CallRecord.get_or_none(self.CallRecord.request_id == request_id)
+                if rec is None:
+                    return None
+                dt = datetime.fromtimestamp(rec.start_time).astimezone()
+                return {
+                    'request_id': rec.request_id,
+                    'client_id': rec.client_id,
+                    'method': f'{rec.method}({rec.signature})',
+                    'worker_id': rec.worker_id,
+                    'date_time': dt.strftime('%Y-%m-%d %H:%M:%S %Z'),
+                    'start_time': rec.start_time,
+                    'end_time': rec.end_time,
+                    'duration': rec.duration,
+                    'status': rec.status,
+                    'sent_bytes': rec.sent_bytes,
+                    'updates': rec.updates,
+                    'kwargs': json.loads(rec.kwargs_json),
+                    'results': json.loads(rec.results_json),
+                }
+
+        return self._run_with_lock_retry(_query)

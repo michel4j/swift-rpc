@@ -447,6 +447,7 @@ class Server(object):
         :param ports: a tuple of ports for frontend, backend
         :param instances: Number of workers to start on server. Additional workers can be started on other hosts
         :param monitor_port: alternate way to specify a monitor port
+        :param monitor_db: Optional path to the SQLite monitor database (defaults to a per-service/port file)
         :param transport: Optional BrokerTransport adapter; defaults to ZmqBrokerTransport
         :param monitor: Optional MonitorPort adapter; defaults to NullMonitor unless monitor_port is set
         :param threaded: If True, run workers in-process in daemon threads instead of multiprocessing.Process
@@ -485,7 +486,12 @@ class Server(object):
                 'description': self.service_type.get_description(),
                 'methods': self.service_type.get_methods()
             }
-            self.monitor = mon.Monitor(service_info=info, db_path=monitor_db or mon.default_db_path())
+            db_path = (
+                monitor_db
+                if monitor_db is not None
+                else mon.default_db_path(service_name=self.service_type.__name__, port=ports[0])
+            )
+            self.monitor = mon.Monitor(service_info=info, db_path=db_path)
             mon.start_monitor_thread(self.monitor, port=monitor_port)
         elif monitor_port:
             logger.warning('Dashboard not enabled. Please run "pip install szrpc[dash] to enable it"')
