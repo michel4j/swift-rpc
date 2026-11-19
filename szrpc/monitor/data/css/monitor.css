@@ -18,8 +18,7 @@
 .monitor-topbar {
   background-color: var(--tblr-bg-surface);
   z-index: 1020;
-  min-height: 3.25rem;
-  padding-block: 0.45rem;
+  padding-block: 0.75rem;
 }
 
 .monitor-topbar-inner {

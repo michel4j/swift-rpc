@@ -54,6 +54,7 @@ const state = {
 const pageRoot = document.getElementById('page-root');
 const serviceDescEl = document.getElementById('service-description');
 const serviceVerEl = document.getElementById('service-version');
+const serviceHostEl = document.getElementById('service-host');
 const topbarEndpointsEl = document.getElementById('topbar-broker-endpoints');
 const navBadgeWorkersEl = document.getElementById('nav-badge-workers');
 const navBadgeRequestsEl = document.getElementById('nav-badge-requests');
@@ -219,6 +220,10 @@ function updateChromeFromData(data) {
 
   if (footerUpdatedEl && state.lastUpdated) {
     footerUpdatedEl.textContent = formatClock(state.lastUpdated);
+  }
+
+  if (serviceHostEl && data.host) {
+    serviceHostEl.textContent = data.host;
   }
 }
 

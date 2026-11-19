@@ -25,7 +25,7 @@
         <div class="navbar-brand">
           <a href="/" data-nav="/" class="d-inline-flex align-items-center gap-2 text-decoration-none text-reset"
              aria-label="Swift RPC Monitor">
-            <svg class="navbar-brand-icon flex-shrink-0" width="28" height="24" viewBox="0 0 118 94"
+            <svg class="navbar-brand-icon flex-shrink-0" width="28" height="28" viewBox="0 0 118 94"
                  aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg">
               <path transform="matrix(1 0 -.2566 .9665 0 0)"
                     d="m38.49 6.154c-7.106 0-12.83 5.723-12.83 12.83l-7.53e-4 59.69c0 7.106 5.722 12.83 12.83 12.83h66.12c7.106 0 12.82-5.723 12.82-12.83l7.5e-4 -59.69c0-7.106-5.722-12.83-12.83-12.83h-66.12zm44.41 16.95 13.81 14.27-0.06917 7.094h-52.62l-0.1147-8.978h40.64l-6.693-6.951 5.048-5.431zm-38.45 27.68h52.62l0.1162 8.984h-40.64l6.691 6.945-5.048 5.431-13.81-14.26 0.06764-7.1z"
@@ -124,8 +124,8 @@
       <header class="monitor-topbar sticky-top border-bottom d-print-none">
         <div class="container-xl monitor-topbar-inner">
           <div class="monitor-topbar-left">
-            <span id="service-description" class="fw-semibold text-truncate">Swift RPC</span>
-            <span id="service-version" class="badge bg-secondary-lt d-none"></span>
+            <span class="d-lg-inline-block d-none"><span id="service-host" class="fw-semibold text-truncate">localhost</span> &nbsp;|&nbsp;</span>
+            <span id="service-description" class="fw-light text-truncate">Swift RPC</span>
             <div class="dropdown" id="broker-endpoints-dropdown">
               <button type="button" class="btn btn-sm btn-ghost-secondary dropdown-toggle"
                       data-bs-toggle="dropdown" data-bs-auto-close="outside"
@@ -228,6 +228,7 @@
             <div class="col-12 col-lg-auto mt-3 mt-lg-0">
               <ul class="list-inline list-inline-dots mb-0 text-secondary">
                 <li class="list-inline-item">Swift RPC Monitor</li>
+                <li class="list-inline-item d-none" id="service-version"></li>
                 <li class="list-inline-item">Updated <span id="footer-updated">—</span></li>
               </ul>
             </div>
