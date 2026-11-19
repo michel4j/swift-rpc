@@ -32,7 +32,7 @@ class MyService(Service):
         return f"Today's date is {datetime.now()}"
 
     def remote__error(self, request):
-        time.sleep(random.randint(1, 10))
+        time.sleep(random.randint(2, 30))
         value = random.random()
         if value > 0.8:
             raise ValueError('This method raises an error randomly!')

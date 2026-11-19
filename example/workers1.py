@@ -2,7 +2,7 @@
 from szrpc import log
 from szrpc.server import ServiceFactory, WorkerManager
 
-from .server import MyService
+from server import MyService
 
 if __name__ == '__main__':
 
@@ -16,7 +16,7 @@ if __name__ == '__main__':
         methods=(
             'hello_world',
             'date',
-            'progress'
+            'progress',
             'error',
         )
     )

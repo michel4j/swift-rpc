@@ -53,6 +53,8 @@ class App(QApplication):
                 self.monitor(self.client.hello_world(name=random.choice(names)))
             elif i % 3 == 0:
                 self.monitor(self.client.progress(label=f'proc{i}'))
+            elif i % 5 == 0:
+                self.monitor(self.client.error())
             else:
                 self.monitor(self.client.date())
             i += 1
