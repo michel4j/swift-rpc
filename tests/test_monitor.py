@@ -350,3 +350,42 @@ def test_sqlite_store_retries_transient_lock(tmp_path):
         assert store.get_call_details('req-retry-1') is not None
     finally:
         store.close()
+
+
+def test_monitor_static_assets_and_spa_routes():
+    import asyncio
+    mon_mod = pytest.importorskip('szrpc.monitor')
+
+    monitor = mon_mod.Monitor(service_info={'description': 'Static', 'methods': ()})
+    try:
+        app = mon_mod.create_app(monitor)
+        routes = {r.path: r.endpoint for r in app.routes if hasattr(r, 'endpoint')}
+
+        for path in ('/', '/workers', '/methods', '/requests'):
+            assert path in routes
+            resp = asyncio.run(routes[path]())
+            assert resp.path == mon_mod.DATA_DIR / 'monitor.html'
+
+        static_mount = next(r for r in app.routes if getattr(r, 'path', None) == '/static')
+        static_app = static_mount.app
+
+        for asset, expected_ct in (
+            ('vendor/tabler.min.css', 'text/css'),
+            ('vendor/tabler.min.js', 'javascript'),
+            ('vendor/tabler-theme.min.js', 'javascript'),
+            ('sparklines.js', 'javascript'),
+        ):
+            scope = {'type': 'http', 'method': 'GET', 'headers': []}
+            resp = asyncio.run(static_app.get_response(asset, scope))
+            assert resp.status_code == 200, asset
+            assert expected_ct in (resp.media_type or '')
+
+        from starlette.exceptions import HTTPException as StarletteHTTPException
+
+        with pytest.raises(StarletteHTTPException) as exc_info:
+            asyncio.run(static_app.get_response('vendor/tabler.min.css.map', {'type': 'http', 'method': 'GET', 'headers': []}))
+        assert exc_info.value.status_code == 404
+
+        assert '/api/does-not-exist' not in routes
+    finally:
+        monitor.close()

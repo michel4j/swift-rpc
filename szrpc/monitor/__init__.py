@@ -13,11 +13,15 @@ import msgpack
 import uvicorn
 from fastapi import FastAPI, Query
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from .. import log
 from .store import SqliteMonitorStore, WINDOWS, _safe_json, default_db_path
 
 logger = log.get_module_logger("server")
+
+DATA_DIR = Path(__file__).parent / "data"
+SPA_ROUTES = ("/", "/workers", "/methods", "/requests")
 
 MAX_HISTORY_RECORDS = 500
 MAX_RESULT_CHUNKS = 100
@@ -357,14 +361,18 @@ def create_app(monitor: Monitor) -> FastAPI:
             offset=offset,
         )
 
-    @app.get("/")
+    app.mount("/static", StaticFiles(directory=DATA_DIR), name="static")
+
     async def index():
-        return FileResponse(Path(__file__).parent / "data" / "monitor.html")
+        return FileResponse(DATA_DIR / "monitor.html")
+
+    for spa_route in SPA_ROUTES:
+        app.add_api_route(spa_route, index, methods=["GET"])
 
     @app.get("/sparklines.js")
     async def sparklines_js():
         return FileResponse(
-            Path(__file__).parent / "data" / "sparklines.js",
+            DATA_DIR / "sparklines.js",
             media_type="text/javascript",
         )
 
