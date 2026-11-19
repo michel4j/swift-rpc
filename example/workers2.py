@@ -15,7 +15,8 @@ if __name__ == '__main__':
         instances=4,
         methods=(
             'progress',
-            'date'
+            'date',
+            'error',
         )
     )
     manager.run()

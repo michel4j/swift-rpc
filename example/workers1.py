@@ -16,6 +16,8 @@ if __name__ == '__main__':
         methods=(
             'hello_world',
             'date',
+            'progress'
+            'error',
         )
     )
     manager.run()
