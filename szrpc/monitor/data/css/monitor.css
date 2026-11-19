@@ -123,6 +123,7 @@
   background-color: var(--tblr-bg-surface-secondary);
   border: 1px solid var(--tblr-border-color);
   border-radius: var(--tblr-border-radius);
+  color: var(--tblr-body-color);
 }
 
 /* Numeric & monospace helpers */
