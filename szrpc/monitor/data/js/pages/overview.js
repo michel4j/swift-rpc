@@ -8,7 +8,17 @@
  * View lifecycle exports: `mount(container, ctx)`, `update(ctx)`, `unmount()`.
  */
 
-import { escapeHtml, formatDuration } from '../format.js';
+import {
+  compareIgnoreCase,
+  computeElapsedSeconds,
+  escapeHtml,
+  formatCallTimestamp,
+  formatDisplayMethod,
+  formatDuration,
+  toFiniteNumber,
+} from '../format.js';
+
+export { computeElapsedSeconds };
 
 const ENDPOINT_SPECS = Object.freeze([
   { key: 'frontend', label: 'Frontend' },
@@ -36,11 +46,6 @@ const CHECK_ICON_SVG = `
     <path d="M5 12l5 5l10 -10"/>
   </svg>
 `;
-
-function toFiniteNumber(value, fallback = 0) {
-  const num = Number(value);
-  return Number.isFinite(num) ? num : fallback;
-}
 
 /**
  * Compute clamped error-rate percentage in `[0, 100]`.
@@ -83,15 +88,7 @@ export function selectTopMethods(methods, limit = TOP_METHODS_LIMIT) {
       const errDiff = Math.max(0, toFiniteNumber(b.errors, 0)) - Math.max(0, toFiniteNumber(a.errors, 0));
       if (errDiff !== 0) return errDiff;
 
-      const aName = String(a.method ?? '');
-      const bName = String(b.method ?? '');
-      const aLower = aName.toLowerCase();
-      const bLower = bName.toLowerCase();
-      if (aLower < bLower) return -1;
-      if (aLower > bLower) return 1;
-      if (aName < bName) return -1;
-      if (aName > bName) return 1;
-      return 0;
+      return compareIgnoreCase(a.method, b.method);
     })
     .slice(0, maxItems);
 }
@@ -113,44 +110,6 @@ export function extractBrokerEndpoints(data) {
     }
   }
   return result;
-}
-
-/**
- * Compute non-negative elapsed seconds from an epoch `startTime` in seconds.
- * Returns `null` if `startTime` is missing or invalid.
- * @param {number} startTime
- * @param {number} [nowSeconds]
- * @returns {number|null}
- */
-export function computeElapsedSeconds(startTime, nowSeconds = Date.now() / 1000) {
-  const start = Number(startTime);
-  if (!Number.isFinite(start) || start <= 0) {
-    return null;
-  }
-  return Math.max(0, nowSeconds - start);
-}
-
-function formatDisplayMethod(call) {
-  const rawMethod = typeof call?.raw_method === 'string' ? call.raw_method.trim() : '';
-  const methodStr = typeof call?.method === 'string' ? call.method.trim() : '';
-  if (!methodStr) {
-    return rawMethod || '—';
-  }
-  if (rawMethod && methodStr === `${rawMethod}()`) {
-    return rawMethod;
-  }
-  return methodStr;
-}
-
-function formatCallTimestamp(call) {
-  if (typeof call?.date_time === 'string' && call.date_time.trim()) {
-    return call.date_time.trim();
-  }
-  const start = Number(call?.start_time);
-  if (Number.isFinite(start) && start > 0) {
-    return new Date(start * 1000).toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC');
-  }
-  return '—';
 }
 
 // --- View controller state ---

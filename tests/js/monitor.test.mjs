@@ -2,10 +2,18 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  REQUESTS_PAGE_SIZE as FORMAT_REQUESTS_PAGE_SIZE,
+  compareIgnoreCase,
   escapeHtml,
   formatBytes,
+  formatCallTimestamp,
+  formatDisplayMethod,
   formatDuration,
+  isAbortError,
+  normalizeStatusParam as formatNormalizeStatusParam,
+  resolveTablerComponent,
   statusBadgeClass,
+  toFiniteNumber,
 } from '../../szrpc/monitor/data/js/format.js';
 import {
   DEFAULT_WINDOW,
@@ -17,6 +25,7 @@ import {
   resolveWindow,
 } from '../../szrpc/monitor/data/js/router.js';
 import {
+  createDrawer,
   extractErrorSummary,
   extractRawMethod,
   formatJsonPretty,
@@ -92,6 +101,64 @@ describe('format.js', () => {
     assert.equal(statusBadgeClass('error'), 'badge bg-red-lt');
     assert.equal(statusBadgeClass('UNKNOWN'), 'badge bg-secondary-lt');
     assert.equal(statusBadgeClass(null), 'badge bg-secondary-lt');
+  });
+
+  it('resolves Tabler v1.5.0 components when window.bootstrap is undefined', () => {
+    class FakeCollapse {}
+    class FakeOffcanvas {}
+    class FakeNestedModal {}
+    class FakeBootstrapTooltip {}
+
+    const prevWindow = globalThis.window;
+    try {
+      globalThis.window = {
+        tabler: {
+          Collapse: FakeCollapse,
+          Offcanvas: FakeOffcanvas,
+          bootstrap: { Modal: FakeNestedModal },
+        },
+        bootstrap: undefined,
+      };
+      assert.equal(resolveTablerComponent('Collapse'), FakeCollapse);
+      assert.equal(resolveTablerComponent('Offcanvas'), FakeOffcanvas);
+      assert.equal(resolveTablerComponent('Modal'), FakeNestedModal);
+      assert.equal(resolveTablerComponent('Missing'), null);
+
+      globalThis.window = { bootstrap: { Tooltip: FakeBootstrapTooltip } };
+      assert.equal(resolveTablerComponent('Tooltip'), FakeBootstrapTooltip);
+      assert.equal(resolveTablerComponent('Offcanvas'), null);
+
+      delete globalThis.window;
+      assert.equal(resolveTablerComponent('Collapse'), null);
+    } finally {
+      if (prevWindow === undefined) {
+        delete globalThis.window;
+      } else {
+        globalThis.window = prevWindow;
+      }
+    }
+  });
+
+  it('normalizes status parameters and shared call helpers', () => {
+    assert.equal(FORMAT_REQUESTS_PAGE_SIZE, 25);
+    assert.equal(formatNormalizeStatusParam('error'), 'ERROR');
+    assert.equal(formatNormalizeStatusParam('ACTIVE'), '');
+    assert.equal(formatNormalizeStatusParam('done'), 'DONE');
+    assert.equal(formatNormalizeStatusParam('  ERROR '), 'ERROR');
+    assert.equal(formatNormalizeStatusParam('unknown'), '');
+    assert.equal(formatNormalizeStatusParam(null), '');
+
+    assert.equal(toFiniteNumber('42.5', 0), 42.5);
+    assert.equal(toFiniteNumber('NaN', 7), 7);
+    assert.equal(compareIgnoreCase('Alpha', 'beta'), -1);
+    assert.equal(compareIgnoreCase('alpha', 'Alpha'), 1);
+    assert.equal(formatDisplayMethod({ raw_method: 'echo', method: 'echo()' }), 'echo');
+    assert.equal(formatDisplayMethod({ method: 'echo(x=1)' }), 'echo(x=1)');
+    assert.equal(formatCallTimestamp({ date_time: '2026-01-01 00:00:00' }), '2026-01-01 00:00:00');
+    assert.equal(formatCallTimestamp({ start_time: 0 }), '—');
+    assert.equal(isAbortError({ name: 'AbortError' }), true);
+    assert.equal(isAbortError({ code: 20 }), true);
+    assert.equal(isAbortError(new Error('network')), false);
   });
 });
 
@@ -244,6 +311,157 @@ describe('drawer.js', () => {
   it('pretty-prints JSON safely', () => {
     assert.equal(formatJsonPretty({ a: 1 }), '{\n  "a": 1\n}');
     assert.equal(formatJsonPretty(undefined), 'null');
+  });
+
+  it('handles drilldown silent close and delayed hidden.bs.offcanvas without firing onClose or clobbering a newer open()', async () => {
+    const makeClassList = () => {
+      const classes = new Set();
+      return {
+        add: (...names) => names.forEach((n) => classes.add(n)),
+        remove: (...names) => names.forEach((n) => classes.delete(n)),
+        contains: (name) => classes.has(name),
+        toggle: (name, force) => {
+          if (force === undefined) {
+            if (classes.has(name)) { classes.delete(name); return false; }
+            classes.add(name); return true;
+          }
+          if (force) classes.add(name); else classes.delete(name);
+          return Boolean(force);
+        },
+      };
+    };
+
+    const makeEl = () => {
+      const listeners = new Map();
+      const attrs = new Map();
+      const el = {
+        classList: makeClassList(),
+        textContent: '',
+        innerHTML: '',
+        title: '',
+        isConnected: true,
+        contains: () => false,
+        setAttribute: (k, v) => attrs.set(k, v),
+        removeAttribute: (k) => { attrs.delete(k); if (k === 'title') el.title = ''; },
+        addEventListener: (ev, fn) => {
+          if (!listeners.has(ev)) listeners.set(ev, []);
+          listeners.get(ev).push(fn);
+        },
+        dispatch: (ev) => {
+          for (const fn of (listeners.get(ev) || [])) fn({ type: ev });
+        },
+      };
+      return el;
+    };
+
+    const drawerEl = makeEl();
+    const idEl = makeEl();
+    const copyIdBtn = makeEl();
+    const bodyEl = makeEl();
+    const elements = {
+      'request-details-drawer': drawerEl,
+      'request-details-id': idEl,
+      'request-details-copy-id': copyIdBtn,
+      'request-details-body': bodyEl,
+    };
+
+    let hideCalls = 0;
+    const pendingHiddenCallbacks = [];
+    class FakeOffcanvas {
+      static getOrCreateInstance(el) {
+        if (!el._fakeInstance) {
+          el._fakeInstance = {
+            show() {
+              el.classList.add('show');
+            },
+            hide() {
+              hideCalls += 1;
+              pendingHiddenCallbacks.push(() => {
+                el.classList.remove('show');
+                el.dispatch('hidden.bs.offcanvas');
+              });
+            },
+          };
+        }
+        return el._fakeInstance;
+      }
+    }
+
+    const prevDocument = globalThis.document;
+    const prevWindow = globalThis.window;
+    try {
+      globalThis.document = {
+        body: {},
+        activeElement: null,
+        getElementById: (id) => elements[id] || null,
+      };
+      globalThis.window = { tabler: { Offcanvas: FakeOffcanvas } };
+
+      let closeCount = 0;
+      const focused = [];
+      const trigger1 = { isConnected: true, focus: () => focused.push('t1') };
+      const trigger2 = { isConnected: true, focus: () => focused.push('t2') };
+      const fetchImpl = async (url) => ({
+        ok: true,
+        json: async () => ({
+          request_id: decodeURIComponent(url.split('/').pop()),
+          status: 'DONE',
+          method: 'echo()',
+          kwargs: {},
+          results: [],
+        }),
+      });
+
+      const drawer = createDrawer({
+        onClose: () => { closeCount += 1; },
+        fetchImpl,
+      });
+
+      // Case 1: drilldown close({ silent: true, restoreFocus: false }) followed by delayed hidden.bs.offcanvas
+      drawer.open('req-1', { triggerEl: trigger1 });
+      assert.equal(drawer.isOpen(), true);
+      assert.equal(idEl.textContent, 'req-1');
+
+      drawer.close({ silent: true, restoreFocus: false });
+      assert.equal(drawer.isOpen(), false);
+      assert.equal(hideCalls, 1);
+
+      // Calling close() again while transition is in flight is a no-op
+      drawer.close({ silent: false });
+      assert.equal(hideCalls, 1);
+
+      // Delayed transition finishes
+      pendingHiddenCallbacks.shift()();
+      assert.equal(closeCount, 0);
+      assert.deepEqual(focused, []);
+      assert.equal(idEl.textContent, '');
+
+      // Case 2: silent close followed immediately by open('req-2') BEFORE delayed hidden.bs.offcanvas fires
+      drawer.open('req-1', { triggerEl: trigger1 });
+      drawer.close({ silent: true, restoreFocus: false });
+      assert.equal(drawer.isOpen(), false);
+
+      drawer.open('req-2', { triggerEl: trigger2 });
+      assert.equal(drawer.isOpen(), true);
+      assert.equal(idEl.textContent, 'req-2');
+
+      // Stale hidden.bs.offcanvas from req-1 arrives after req-2 opened
+      pendingHiddenCallbacks.shift()();
+      assert.equal(closeCount, 0);
+      assert.equal(drawer.isOpen(), true);
+      assert.equal(idEl.textContent, 'req-2');
+      assert.deepEqual(focused, []);
+
+      // Subsequent genuine user dismiss of req-2 fires onClose() and restores focus to trigger2
+      drawerEl.classList.remove('show');
+      drawerEl.dispatch('hidden.bs.offcanvas');
+      assert.equal(closeCount, 1);
+      assert.equal(drawer.isOpen(), false);
+      assert.deepEqual(focused, ['t2']);
+    } finally {
+      if (prevDocument === undefined) delete globalThis.document; else globalThis.document = prevDocument;
+      if (prevWindow === undefined) delete globalThis.window; else globalThis.window = prevWindow;
+    }
   });
 });
 

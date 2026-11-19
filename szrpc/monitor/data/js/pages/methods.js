@@ -8,7 +8,13 @@
  * View lifecycle exports: `mount(container, ctx)`, `update(ctx)`, `unmount()`.
  */
 
-import { escapeHtml, formatBytes, formatDuration } from '../format.js';
+import {
+  compareIgnoreCase,
+  escapeHtml,
+  formatBytes,
+  formatDuration,
+  toFiniteNumber,
+} from '../format.js';
 
 const VALID_SORT_COLS = new Set([
   'method',
@@ -28,11 +34,6 @@ const COLUMNS = [
   { key: null, label: 'Latency', align: 'start', defaultDir: null },
   { key: 'total_bytes', label: 'Payload', align: 'end', defaultDir: 'desc' },
 ];
-
-function toFiniteNumber(value, fallback = 0) {
-  const num = Number(value);
-  return Number.isFinite(num) ? num : fallback;
-}
 
 function getMethodErrorRatePct(method) {
   if (!method || typeof method !== 'object') {
@@ -117,21 +118,11 @@ export function filterAndSortMethods(
     ? list.filter((item) => String(item?.method ?? '').toLowerCase().includes(needle))
     : list.slice();
 
-  const compareNames = (aName, bName) => {
-    const aLower = aName.toLowerCase();
-    const bLower = bName.toLowerCase();
-    if (aLower < bLower) return -1;
-    if (aLower > bLower) return 1;
-    if (aName < bName) return -1;
-    if (aName > bName) return 1;
-    return 0;
-  };
-
   filtered.sort((a, b) => {
     const aName = String(a?.method ?? '');
     const bName = String(b?.method ?? '');
     if (col === 'method') {
-      return compareNames(aName, bName) * dir;
+      return compareIgnoreCase(aName, bName) * dir;
     }
 
     const aVal = col === 'error_rate'
@@ -144,7 +135,7 @@ export function filterAndSortMethods(
     if (aVal !== bVal) {
       return (aVal - bVal) * dir;
     }
-    return compareNames(aName, bName);
+    return compareIgnoreCase(aName, bName);
   });
 
   return filtered;

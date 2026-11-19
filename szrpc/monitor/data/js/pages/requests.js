@@ -12,77 +12,24 @@
  */
 
 import {
+  REQUESTS_PAGE_SIZE,
+  compareIgnoreCase,
+  computeElapsedSeconds,
   escapeHtml,
+  extractRawMethod,
   formatBytes,
+  formatCallTimestamp,
+  formatDisplayMethod,
   formatDuration,
+  normalizeStatusParam,
   statusBadgeClass,
+  toFiniteNumber,
 } from '../format.js';
 import { buildUrl } from '../router.js';
 
-export const REQUESTS_PAGE_SIZE = 25;
+export { REQUESTS_PAGE_SIZE, normalizeStatusParam };
+
 const DEBOUNCE_MS = 250;
-const VALID_STATUS_FILTERS = new Set(['DONE', 'ERROR']);
-
-function toFiniteNumber(value, fallback = 0) {
-  const num = Number(value);
-  return Number.isFinite(num) ? num : fallback;
-}
-
-function compareText(a, b) {
-  const aLower = a.toLowerCase();
-  const bLower = b.toLowerCase();
-  if (aLower < bLower) return -1;
-  if (aLower > bLower) return 1;
-  if (a < b) return -1;
-  if (a > b) return 1;
-  return 0;
-}
-
-function extractCallRawMethod(call) {
-  if (!call || typeof call !== 'object') return '';
-  if (typeof call.raw_method === 'string' && call.raw_method.trim()) {
-    return call.raw_method.trim();
-  }
-  if (typeof call.method === 'string' && call.method.trim()) {
-    return call.method.replace(/\(.*$/, '').trim();
-  }
-  return '';
-}
-
-function formatDisplayMethod(call) {
-  const raw = extractCallRawMethod(call);
-  const full = typeof call?.method === 'string' ? call.method.trim() : '';
-  if (!full) return raw || '—';
-  if (raw && full === `${raw}()`) return raw;
-  return full;
-}
-
-function formatCallTimestamp(call) {
-  if (typeof call?.date_time === 'string' && call.date_time.trim()) {
-    return call.date_time.trim();
-  }
-  const start = Number(call?.start_time);
-  if (Number.isFinite(start) && start > 0) {
-    return new Date(start * 1000).toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC');
-  }
-  return '—';
-}
-
-function computeElapsedSeconds(startTime, nowSec = Date.now() / 1000) {
-  const start = Number(startTime);
-  if (!Number.isFinite(start) || start <= 0) return null;
-  return Math.max(0, nowSec - start);
-}
-
-/**
- * Normalize a status filter query parameter to `'DONE'`, `'ERROR'`, or `''` (All).
- * @param {string|null|undefined} raw
- * @returns {'' | 'DONE' | 'ERROR'}
- */
-export function normalizeStatusParam(raw) {
-  const val = String(raw ?? '').trim().toUpperCase();
-  return VALID_STATUS_FILTERS.has(val) ? val : '';
-}
 
 /**
  * Filter live active Requests by exact-match `method` and `worker` filters
@@ -98,7 +45,7 @@ export function filterActiveCalls(activeCalls, { method = '', worker = '' } = {}
 
   return activeCalls.filter((call) => {
     if (!call || typeof call !== 'object') return false;
-    if (methodFilter && extractCallRawMethod(call) !== methodFilter) {
+    if (methodFilter && extractRawMethod(call) !== methodFilter) {
       return false;
     }
     if (workerFilter && String(call.worker_id ?? '').trim() !== workerFilter) {
@@ -187,7 +134,7 @@ export function collectKnownMethodsAndWorkers({
     for (const group of [data.active_calls, data.historical_calls]) {
       if (Array.isArray(group)) {
         for (const row of group) {
-          addMethod(extractCallRawMethod(row));
+          addMethod(extractRawMethod(row));
           addWorker(row?.worker_id);
         }
       }
@@ -196,13 +143,13 @@ export function collectKnownMethodsAndWorkers({
 
   const callRows = Array.isArray(calls?.calls) ? calls.calls : (Array.isArray(calls) ? calls : []);
   for (const row of callRows) {
-    addMethod(extractCallRawMethod(row));
+    addMethod(extractRawMethod(row));
     addWorker(row?.worker_id);
   }
 
   return {
-    methods: Array.from(methodSet).sort(compareText),
-    workers: Array.from(workerSet).sort(compareText),
+    methods: Array.from(methodSet).sort(compareIgnoreCase),
+    workers: Array.from(workerSet).sort(compareIgnoreCase),
   };
 }
 

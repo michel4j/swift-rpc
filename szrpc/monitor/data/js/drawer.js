@@ -6,12 +6,20 @@
  */
 
 import {
+  computeElapsedSeconds,
   copyText,
   escapeHtml,
+  extractRawMethod,
   formatBytes,
+  formatCallTimestamp,
+  formatDisplayMethod,
   formatDuration,
+  isAbortError,
+  resolveTablerComponent,
   statusBadgeClass,
 } from './format.js';
+
+export { extractRawMethod };
 
 const ERROR_PREVIEW_MAX_LEN = 240;
 const COPY_FEEDBACK_MS = 1500;
@@ -47,34 +55,6 @@ export function formatJsonPretty(value) {
   } catch {
     return String(value);
   }
-}
-
-/**
- * Extract the canonical raw method name (without trailing `(...)` signature)
- * for exact-match `/requests?method=<m>` filtering.
- */
-export function extractRawMethod(data) {
-  if (!data || typeof data !== 'object') {
-    return '';
-  }
-  if (typeof data.raw_method === 'string' && data.raw_method.trim()) {
-    return data.raw_method.trim();
-  }
-  if (typeof data.method === 'string' && data.method.trim()) {
-    return data.method.replace(/\(.*$/, '').trim();
-  }
-  return '';
-}
-
-function getDisplayMethod(data, rawMethod) {
-  const methodStr = typeof data?.method === 'string' ? data.method.trim() : '';
-  if (!methodStr) {
-    return rawMethod;
-  }
-  if (rawMethod && methodStr === `${rawMethod}()`) {
-    return rawMethod;
-  }
-  return methodStr;
 }
 
 function normalizeErrorEntry(entry) {
@@ -165,31 +145,8 @@ export function extractErrorSummary(data) {
   };
 }
 
-function isAbortError(err) {
-  return Boolean(err && (err.name === 'AbortError' || err.code === 20));
-}
-
-function getOffcanvasClass() {
-  if (typeof window === 'undefined') {
-    return null;
-  }
-  return (
-    window.bootstrap?.Offcanvas
-    || window.tabler?.Offcanvas
-    || window.tabler?.bootstrap?.Offcanvas
-    || null
-  );
-}
-
-function formatTimestamp(data) {
-  if (typeof data?.date_time === 'string' && data.date_time.trim()) {
-    return data.date_time.trim();
-  }
-  const start = Number(data?.start_time);
-  if (Number.isFinite(start) && start > 0) {
-    return new Date(start * 1000).toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC');
-  }
-  return '—';
+function getOffcanvasCtor() {
+  return resolveTablerComponent('Offcanvas');
 }
 
 function formatDurationCell(data) {
@@ -197,9 +154,8 @@ function formatDurationCell(data) {
     return escapeHtml(formatDuration(data.duration));
   }
   if (String(data?.status || '').toUpperCase() === 'ACTIVE') {
-    const start = Number(data?.start_time);
-    if (Number.isFinite(start) && start > 0) {
-      const elapsed = Math.max(0, Date.now() / 1000 - start);
+    const elapsed = computeElapsedSeconds(data?.start_time);
+    if (elapsed !== null) {
       return `${escapeHtml(formatDuration(elapsed))} <span class="text-secondary">(active)</span>`;
     }
   }
@@ -242,12 +198,12 @@ function renderErrorBanner(data) {
 function renderSummaryPanel(data) {
   const status = data?.status || 'UNKNOWN';
   const rawMethod = extractRawMethod(data);
-  const displayMethod = getDisplayMethod(data, rawMethod);
+  const displayMethod = formatDisplayMethod(data, rawMethod);
   const workerId = typeof data?.worker_id === 'string' ? data.worker_id.trim() : '';
   const clientId = typeof data?.client_id === 'string' && data.client_id.trim()
     ? data.client_id.trim()
     : '—';
-  const timestamp = formatTimestamp(data);
+  const timestamp = formatCallTimestamp(data);
   const durationHtml = formatDurationCell(data);
   const sentBytes = formatBytes(data?.sent_bytes ?? 0);
   const updatesCount = Number.isFinite(Number(data?.updates)) ? String(Number(data.updates)) : '0';
@@ -325,12 +281,13 @@ export function createDrawer({
   const doFetch = fetchImpl || (typeof globalThis !== 'undefined' ? globalThis.fetch : null);
 
   let currentRequestId = null;
+  let closing = false;
+  let openEpoch = 0;
   let activeTab = 'summary';
   let returnFocusEl = null;
-  let lastClickedTrigger = null;
-  let suppressCloseCallback = false;
   let fetchController = null;
   let jsonPayloads = { args: '{}', results: '[]', raw: '{}' };
+  const pendingHideEpochs = [];
   const feedbackTimers = new Map();
 
   function clearFeedbackTimers() {
@@ -480,7 +437,7 @@ export function createDrawer({
     `;
   }
 
-  async function loadRequest(requestId) {
+  async function loadRequest(requestId, epoch = openEpoch) {
     abortInFlight();
     clearFeedbackTimers();
     renderLoading();
@@ -499,7 +456,7 @@ export function createDrawer({
         headers: { Accept: 'application/json' },
       });
 
-      if (controller.signal.aborted || currentRequestId !== requestId) {
+      if (controller.signal.aborted || openEpoch !== epoch || currentRequestId !== requestId) {
         return;
       }
 
@@ -509,7 +466,7 @@ export function createDrawer({
 
       const payload = await response.json();
 
-      if (controller.signal.aborted || currentRequestId !== requestId) {
+      if (controller.signal.aborted || openEpoch !== epoch || currentRequestId !== requestId) {
         return;
       }
 
@@ -524,7 +481,7 @@ export function createDrawer({
 
       renderDetails(payload);
     } catch (err) {
-      if (isAbortError(err) || controller.signal.aborted || currentRequestId !== requestId) {
+      if (isAbortError(err) || controller.signal.aborted || openEpoch !== epoch || currentRequestId !== requestId) {
         return;
       }
       renderFetchError(err?.message || 'Network error while fetching Request details.');
@@ -535,12 +492,11 @@ export function createDrawer({
     }
   }
 
-  function handleHidden() {
+  function finalizeHidden({ silent = false } = {}) {
     abortInFlight();
     clearFeedbackTimers();
 
-    const shouldNotify = !suppressCloseCallback;
-    suppressCloseCallback = false;
+    closing = false;
     currentRequestId = null;
     activeTab = 'summary';
     jsonPayloads = { args: '{}', results: '[]', raw: '{}' };
@@ -560,19 +516,26 @@ export function createDrawer({
       focusTarget.focus();
     }
 
-    if (shouldNotify) {
+    if (!silent) {
       onClose();
     }
   }
 
-  // Capture triggering element from `[data-open-req]` clicks before router sync opens the drawer
-  if (typeof document !== 'undefined') {
-    document.addEventListener('click', (event) => {
-      const reqEl = event.target?.closest?.('[data-open-req]');
-      if (reqEl) {
-        lastClickedTrigger = { id: String(reqEl.dataset.openReq || ''), el: reqEl };
+  function handleHidden() {
+    if (pendingHideEpochs.length > 0) {
+      const pending = pendingHideEpochs.shift();
+      if (pending.epoch !== openEpoch) {
+        return;
       }
-    }, true);
+      finalizeHidden({ silent: pending.silent });
+      return;
+    }
+
+    if (!closing && currentRequestId === null) {
+      return;
+    }
+
+    finalizeHidden({ silent: false });
   }
 
   if (drawerEl) {
@@ -615,7 +578,7 @@ export function createDrawer({
       if (retryBtn) {
         event.preventDefault();
         if (currentRequestId) {
-          loadRequest(currentRequestId);
+          loadRequest(currentRequestId, openEpoch);
         }
         return;
       }
@@ -662,15 +625,13 @@ export function createDrawer({
   function open(requestId, { triggerEl = null } = {}) {
     if (!requestId) return;
     const id = String(requestId);
-    const pendingTrigger = lastClickedTrigger && lastClickedTrigger.id === id
-      ? lastClickedTrigger.el
-      : null;
-    lastClickedTrigger = null;
+
+    openEpoch += 1;
+    const epoch = openEpoch;
+    closing = false;
 
     if (triggerEl && typeof triggerEl.focus === 'function') {
       returnFocusEl = triggerEl;
-    } else if (pendingTrigger && typeof pendingTrigger.focus === 'function' && pendingTrigger.isConnected) {
-      returnFocusEl = pendingTrigger;
     } else if (!returnFocusEl && typeof document !== 'undefined') {
       const active = document.activeElement;
       if (active && active !== document.body && (!drawerEl || !drawerEl.contains(active))) {
@@ -680,7 +641,6 @@ export function createDrawer({
 
     currentRequestId = id;
     activeTab = 'summary';
-    suppressCloseCallback = false;
 
     if (idEl) {
       idEl.textContent = id;
@@ -691,37 +651,42 @@ export function createDrawer({
       copyIdBtn.textContent = 'Copy ID';
     }
 
-    const Offcanvas = getOffcanvasClass();
+    const Offcanvas = getOffcanvasCtor();
     if (drawerEl && Offcanvas) {
       Offcanvas.getOrCreateInstance(drawerEl).show();
     }
 
-    loadRequest(id);
+    loadRequest(id, epoch);
   }
 
   function close({ silent = false, restoreFocus = true } = {}) {
     abortInFlight();
     if (!currentRequestId) return;
 
+    const epoch = openEpoch;
+    const isSilent = Boolean(silent);
+    currentRequestId = null;
+    closing = true;
     if (!restoreFocus) {
       returnFocusEl = null;
     }
-    suppressCloseCallback = Boolean(silent);
 
-    const Offcanvas = getOffcanvasClass();
-    if (drawerEl && Offcanvas) {
-      const instance = Offcanvas.getOrCreateInstance(drawerEl);
-      if (instance && instance._isShown !== false) {
-        instance.hide();
-        return;
-      }
+    const Offcanvas = getOffcanvasCtor();
+    const isVisibleInDom = Boolean(
+      drawerEl
+      && (drawerEl.classList.contains('show') || drawerEl.classList.contains('showing')),
+    );
+    if (drawerEl && Offcanvas && isVisibleInDom) {
+      pendingHideEpochs.push({ epoch, silent: isSilent });
+      Offcanvas.getOrCreateInstance(drawerEl).hide();
+      return;
     }
 
-    handleHidden();
+    finalizeHidden({ silent: isSilent });
   }
 
   function isOpen() {
-    return currentRequestId !== null;
+    return currentRequestId !== null && !closing;
   }
 
   return { open, close, isOpen };

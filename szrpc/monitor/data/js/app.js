@@ -5,7 +5,15 @@
  * navigation/drawer/copy handlers, and active page lifecycle.
  */
 
-import { announce, copyText, escapeHtml } from './format.js';
+import {
+  REQUESTS_PAGE_SIZE,
+  announce,
+  copyText,
+  escapeHtml,
+  isAbortError,
+  normalizeStatusParam,
+  resolveTablerComponent,
+} from './format.js';
 import { createRouter, normalizeRoute, parseQuery } from './router.js';
 import { createDrawer } from './drawer.js';
 import * as overviewPage from './pages/overview.js';
@@ -14,7 +22,6 @@ import * as methodsPage from './pages/methods.js';
 import * as requestsPage from './pages/requests.js';
 
 const HEARTBEAT_INTERVAL_MS = 1000;
-const REQUESTS_PAGE_SIZE = 25;
 const PAGE_POLL_INTERVAL_MS = {
   '/': 5000,
   '/workers': 5000,
@@ -41,7 +48,7 @@ const state = {
   recentFailures: null,
   autoRefresh: true,
   lastUpdated: null,
-  connectionError: null,
+  connectionError: false,
 };
 
 const pageRoot = document.getElementById('page-root');
@@ -68,6 +75,9 @@ let heartbeatTimer = null;
 let pageTimer = null;
 let lastEndpointsSignature = '';
 let openedDrawerRequestId = null;
+let pendingTrigger = null;
+let heartbeatError = null;
+let pageFetchError = null;
 
 function formatClock(date) {
   if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
@@ -75,10 +85,6 @@ function formatClock(date) {
   }
   const pad = (n) => String(n).padStart(2, '0');
   return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
-}
-
-function isAbortError(err) {
-  return Boolean(err && (err.name === 'AbortError' || err.code === 20));
 }
 
 async function fetchJson(url, signal) {
@@ -111,7 +117,6 @@ function buildContext() {
     replaceQuery: (patch, opts) => router.replaceQuery(patch, opts),
     openRequest,
     refresh,
-    fetchCalls,
     signal: routeAbortController.signal,
   };
 }
@@ -122,6 +127,11 @@ function notifyActivePage() {
   }
 }
 
+function syncConnectionError() {
+  state.connectionError = Boolean(heartbeatError || pageFetchError);
+  updateConnectionBanner();
+}
+
 function updateConnectionBanner() {
   if (!connectionBannerEl) return;
   if (!state.connectionError) {
@@ -129,9 +139,13 @@ function updateConnectionBanner() {
     return;
   }
   if (connectionDetailEl) {
-    connectionDetailEl.textContent = state.lastUpdated
-      ? `Last updated ${formatClock(state.lastUpdated)}. Showing last known data.`
-      : 'Unable to reach Monitor API.';
+    if (pageFetchError && !heartbeatError) {
+      connectionDetailEl.textContent = `${pageFetchError}.`;
+    } else {
+      connectionDetailEl.textContent = state.lastUpdated
+        ? `Last updated ${formatClock(state.lastUpdated)}. Showing last known data.`
+        : 'Unable to reach Monitor API.';
+    }
   }
   connectionBannerEl.classList.remove('d-none');
 }
@@ -240,7 +254,7 @@ function closeMobileSidebar() {
   if (!sidebarMenuEl || !sidebarMenuEl.classList.contains('show')) {
     return;
   }
-  const Collapse = window.bootstrap?.Collapse;
+  const Collapse = resolveTablerComponent('Collapse');
   if (Collapse) {
     Collapse.getOrCreateInstance(sidebarMenuEl, { toggle: false }).hide();
   } else {
@@ -248,29 +262,23 @@ function closeMobileSidebar() {
   }
 }
 
-async function fetchCalls(overrides = {}) {
-  const win = overrides.window || state.window;
-  const limit = Number(overrides.limit ?? REQUESTS_PAGE_SIZE);
-  const rawOffset = overrides.offset !== undefined ? overrides.offset : state.query.offset;
-  const offset = Math.max(0, Number.parseInt(rawOffset || '0', 10) || 0);
-  const status = overrides.status !== undefined ? overrides.status : state.query.status;
-  const method = overrides.method !== undefined ? overrides.method : state.query.method;
-  const workerId = overrides.worker !== undefined
-    ? overrides.worker
-    : (overrides.worker_id !== undefined ? overrides.worker_id : state.query.worker);
+async function fetchCalls(signal) {
+  const offset = Math.max(0, Number.parseInt(state.query.offset || '0', 10) || 0);
+  const status = normalizeStatusParam(state.query.status);
+  const method = state.query.method;
+  const workerId = state.query.worker;
 
   const params = new URLSearchParams({
-    window: win,
-    limit: String(limit),
+    window: state.window,
+    limit: String(REQUESTS_PAGE_SIZE),
     offset: String(offset),
   });
-  if (status) params.set('status', String(status));
+  if (status) params.set('status', status);
   if (method) params.set('method', String(method));
   if (workerId) params.set('worker_id', String(workerId));
 
-  const signal = overrides.signal || routeAbortController.signal;
   const payload = await fetchJson(`/api/calls?${params.toString()}`, signal);
-  if (overrides.updateState !== false) {
+  if (!signal?.aborted) {
     state.calls = payload;
   }
   return payload;
@@ -288,14 +296,14 @@ async function fetchHeartbeat() {
     if (controller.signal.aborted) return;
     state.data = data;
     state.lastUpdated = new Date();
-    state.connectionError = null;
-    updateConnectionBanner();
+    heartbeatError = null;
+    syncConnectionError();
     updateChromeFromData(data);
     notifyActivePage();
   } catch (err) {
     if (isAbortError(err)) return;
-    state.connectionError = err?.message || 'Failed to fetch /api/data';
-    updateConnectionBanner();
+    heartbeatError = err?.message || 'Failed to fetch /api/data';
+    syncConnectionError();
   } finally {
     if (heartbeatController === controller) {
       heartbeatController = null;
@@ -341,17 +349,21 @@ async function fetchActivePage() {
         break;
       }
       case '/requests': {
-        await fetchCalls({ signal });
+        await fetchCalls(signal);
         if (signal.aborted) return;
         break;
       }
       default:
         break;
     }
+    pageFetchError = null;
+    syncConnectionError();
     notifyActivePage();
   } catch (err) {
     if (isAbortError(err)) return;
-    // Heartbeat owns the global connection banner; keep last good page data intact.
+    console.error('[monitor] Failed to fetch active page data:', err);
+    pageFetchError = err?.message || 'Failed to fetch page data';
+    syncConnectionError();
   } finally {
     if (pageFetchController === controller) {
       pageFetchController = null;
@@ -411,25 +423,37 @@ const drawer = createDrawer({
 function openRequest(requestId, opts = {}) {
   if (!requestId) return;
   const id = String(requestId);
+  pendingTrigger = opts?.triggerEl ? { id, el: opts.triggerEl } : null;
   if (state.query.request !== id) {
     router.replaceQuery({ request: id }, { push: true });
   }
   if (openedDrawerRequestId !== id || !drawer.isOpen()) {
+    const triggerEl = pendingTrigger && pendingTrigger.id === id
+      ? pendingTrigger.el
+      : (opts?.triggerEl ?? null);
+    pendingTrigger = null;
     openedDrawerRequestId = id;
-    drawer.open(id, opts);
+    drawer.open(id, { ...opts, triggerEl });
   }
 }
 
 function syncDrawerWithQuery() {
   const reqId = state.query.request || null;
   if (reqId) {
+    const triggerEl = pendingTrigger && pendingTrigger.id === reqId ? pendingTrigger.el : null;
+    pendingTrigger = null;
     if (openedDrawerRequestId !== reqId || !drawer.isOpen()) {
       openedDrawerRequestId = reqId;
-      drawer.open(reqId);
+      drawer.open(reqId, triggerEl ? { triggerEl } : undefined);
     }
-  } else if (drawer.isOpen()) {
-    openedDrawerRequestId = null;
-    drawer.close({ silent: true });
+  } else {
+    pendingTrigger = null;
+    if (drawer.isOpen()) {
+      openedDrawerRequestId = null;
+      drawer.close({ silent: true });
+    } else {
+      openedDrawerRequestId = null;
+    }
   }
 }
 
@@ -462,6 +486,8 @@ function handleRouteChange(next, prev) {
   }
 
   if (routeChanged) {
+    pageFetchError = null;
+    syncConnectionError();
     if (activePage && typeof activePage.unmount === 'function') {
       activePage.unmount();
     }
