@@ -1,809 +1,259 @@
-<!DOCTYPE html>
-<html lang="en">
+<!doctype html>
+<html lang="en" data-bs-navbar-position="vertical" data-bs-sidebar="folded-hover">
 <head>
-    <title>Swift RPC Server</title>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css"
-          rel="stylesheet"
-          integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB"
-          crossorigin="anonymous">
-    <style>
-        :root {
-            --bs-body-font-size: 0.95rem;
-            --bs-border-radius: 0.25rem;
-            --bs-border-radius-lg: 0.25rem;
-            --bs-border-radius-sm: 0.25rem;
-        }
-        .card {
-            --bs-card-border-width: 0;
-        }
-
-        .status-ACTIVE {
-            color: var(--bs-primary);
-            font-weight: bold;
-        }
-
-        .status-DONE {
-            color: var(--bs-success);
-            font-weight: bold;
-        }
-
-        .status-ERROR {
-            color: var(--bs-danger);
-            font-weight: bold;
-        }
-
-        .table {
-            --bs-table-bg: transparent !important;
-            background-color: transparent !important;
-        }
-
-        td {
-            /*font-family: monospace;*/
-            font-size: 0.8rem;
-        }
-
-        #server_info {
-            font-size: 0.8rem;
-            opacity: 0.7;
-            column-gap: 1em;
-        }
-
-        .server-value {
-            font-family: monospace;
-            color: var(--bs-primary);
-        }
-
-        .duration-table-wrapper {
-            overflow: auto;
-            max-inline-size: 100%;
-            max-block-size: min(320px, 60vh);
-            container-type: inline-size;
-        }
-
-        .duration-table {
-            border-collapse: separate;
-            border-spacing: 0;
-            --label-2: "Calls";
-            --label-3: "Errors";
-            --label-4: "Min";
-            --label-5: "Avg";
-            --label-6: "p95";
-            --label-7: "Max";
-            --label-8: "Payload";
-        }
-
-        .duration-table thead {
-            position: sticky;
-            inset-block-start: 0;
-            z-index: 1;
-            background-color: var(--bs-body-bg);
-        }
-
-        .duration-table tbody th {
-            position: sticky;
-            inset-inline-start: 0;
-            background-color: var(--bs-body-bg);
-            font-family: var(--bs-font-monospace);
-            font-weight: 600;
-            white-space: nowrap;
-        }
-
-        .duration-table td.num,
-        .duration-table th.num {
-            text-align: end;
-            font-family: var(--bs-font-monospace);
-            white-space: nowrap;
-        }
-
-        @container (width < 540px) {
-            .duration-table,
-            .duration-table thead,
-            .duration-table tbody,
-            .duration-table tr,
-            .duration-table th,
-            .duration-table td {
-                display: block;
-            }
-
-            .duration-table thead {
-                display: none;
-            }
-
-            .duration-table tbody tr:not(.empty-row) {
-                margin-block-end: 0.75rem;
-                border: 1px solid var(--bs-border-color);
-                border-radius: var(--bs-border-radius);
-                padding: 0.25rem 0.5rem;
-            }
-
-            .duration-table tbody th {
-                position: sticky;
-                inset-block-start: 0;
-                z-index: 2;
-                border-bottom: 1px solid var(--bs-border-color);
-            }
-
-            .duration-table td.num {
-                display: flex;
-                justify-content: space-between;
-                text-align: end;
-            }
-
-            .duration-table td:nth-child(2)::before { content: var(--label-2) ": "; color: var(--bs-secondary-color); font-family: var(--bs-body-font-family); }
-            .duration-table td:nth-child(3)::before { content: var(--label-3) ": "; color: var(--bs-secondary-color); font-family: var(--bs-body-font-family); }
-            .duration-table td:nth-child(4)::before { content: var(--label-4) ": "; color: var(--bs-secondary-color); font-family: var(--bs-body-font-family); }
-            .duration-table td:nth-child(5)::before { content: var(--label-5) ": "; color: var(--bs-secondary-color); font-family: var(--bs-body-font-family); }
-            .duration-table td:nth-child(6)::before { content: var(--label-6) ": "; color: var(--bs-secondary-color); font-family: var(--bs-body-font-family); }
-            .duration-table td:nth-child(7)::before { content: var(--label-7) ": "; color: var(--bs-secondary-color); font-family: var(--bs-body-font-family); }
-            .duration-table td:nth-child(8)::before { content: var(--label-8) ": "; color: var(--bs-secondary-color); font-family: var(--bs-body-font-family); }
-        }
-
-        #worker-sparklines-card {
-            content-visibility: auto;
-            contain-intrinsic-size: auto none auto 220px;
-        }
-
-        .worker-spark-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-            gap: 0.75rem;
-        }
-
-        .worker-spark-card {
-            container: worker-card / inline-size;
-            display: flex;
-            flex-direction: column;
-            gap: 0.5rem;
-            border: 1px solid var(--bs-border-color);
-            border-radius: var(--bs-border-radius);
-            padding: 0.65rem 0.75rem;
-            background-color: var(--bs-tertiary-bg);
-        }
-
-        .worker-spark-header {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 0.5rem;
-            min-inline-size: 0;
-        }
-
-        .worker-spark-identity {
-            display: flex;
-            align-items: center;
-            gap: 0.4rem;
-            min-inline-size: 0;
-        }
-
-        .worker-spark-dot {
-            inline-size: 0.55rem;
-            block-size: 0.55rem;
-            border-radius: 50%;
-            flex-shrink: 0;
-        }
-
-        .worker-spark-title {
-            font-family: var(--bs-font-monospace);
-            font-size: 0.82rem;
-            font-weight: 600;
-            margin: 0;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-        }
-
-        .spark-metrics-grid {
-            display: grid;
-            grid-template-columns: minmax(0, 1fr);
-            gap: 0.5rem 0.75rem;
-        }
-
-        @container worker-card (inline-size >= 250px) {
-            .spark-metrics-grid {
-                grid-template-columns: repeat(2, minmax(0, 1fr));
-            }
-        }
-
-        .spark-metric {
-            display: flex;
-            flex-direction: column;
-            gap: 0.15rem;
-            min-inline-size: 0;
-        }
-
-        .spark-metric-full {
-            grid-column: 1 / -1;
-        }
-
-        .spark-metric-head {
-            display: flex;
-            justify-content: space-between;
-            align-items: baseline;
-            gap: 0.35rem;
-            font-size: 0.72rem;
-            line-height: 1.2;
-        }
-
-        .spark-metric-label {
-            color: var(--bs-secondary-color);
-            text-transform: uppercase;
-            letter-spacing: 0.03em;
-        }
-
-        .spark-metric-value {
-            font-family: var(--bs-font-monospace);
-            font-weight: 600;
-            white-space: nowrap;
-        }
-
-        .sparkline-svg {
-            display: block;
-            inline-size: 100%;
-            block-size: 28px;
-            overflow: visible;
-        }
-
-        .sparkline-svg-tall {
-            block-size: 32px;
-        }
-
-        .worker-spark-footer {
-            display: flex;
-            align-items: baseline;
-            gap: 0.4rem;
-            margin-top: auto;
-            padding-top: 0.45rem;
-            border-top: 1px solid var(--bs-border-color);
-            font-size: 0.72rem;
-            min-inline-size: 0;
-        }
-
-        .worker-methods-label {
-            color: var(--bs-secondary-color);
-            text-transform: uppercase;
-            letter-spacing: 0.03em;
-            flex-shrink: 0;
-        }
-
-        .worker-methods-list {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 0.25rem;
-            list-style: none;
-            margin: 0;
-            padding: 0;
-            min-inline-size: 0;
-        }
-
-        .worker-method-tag {
-            font-family: var(--bs-font-monospace);
-            font-size: 0.68rem;
-            padding: 0.08rem 0.35rem;
-            border: 1px solid var(--bs-border-color);
-            border-radius: var(--bs-border-radius-sm);
-            background-color: var(--bs-body-bg);
-            color: var(--bs-body-color);
-        }
-
-        .worker-methods-empty {
-            color: var(--bs-secondary-color);
-            font-family: var(--bs-font-monospace);
-        }
-
-        pre {
-            white-space: pre-wrap;
-            word-wrap: break-word;
-            font-size: 0.8em;
-            margin: 0;
-            max-height: 500px;
-            overflow-y: auto;
-        }
-    </style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Swift RPC Monitor</title>
+  <link href="/static/vendor/tabler.min.css" rel="stylesheet">
+  <link href="/static/css/monitor.css" rel="stylesheet">
 </head>
-<body class="bg-tertiary">
-    <header class="sticky-top mb-3 bg-body">
-        <div class="container-fluid">
-            <div class="row border-bottom align-items-center">
-                <div class="col-auto p-2 d-flex" title="" id="server_version">
-                    <a href="/" class="text-body text-decoration-none">
-                        <svg class="me-2" width="40" height="36" role="img" viewBox="0 0 118 94" xmlns="http://www.w3.org/2000/svg">
-                            <path transform="matrix(1 0 -.2566 .9665 0 0)"
-                                  d="m38.49 6.154c-7.106 0-12.83 5.723-12.83 12.83l-7.53e-4 59.69c0 7.106 5.722 12.83 12.83 12.83h66.12c7.106 0 12.82-5.723 12.82-12.83l7.5e-4 -59.69c0-7.106-5.722-12.83-12.83-12.83h-66.12zm44.41 16.95 13.81 14.27-0.06917 7.094h-52.62l-0.1147-8.978h40.64l-6.693-6.951 5.048-5.431zm-38.45 27.68h52.62l0.1162 8.984h-40.64l6.691 6.945-5.048 5.431-13.81-14.26 0.06764-7.1z"
-                                  fill="currentColor" style="paint-order:stroke markers fill"/>
-                        </svg>
-                    </a>
-                    <div class="d-flex flex-column justify-content-center align-items-start">
-                        <div class="lead" id="server_description"></div>
-                    </div>
-                </div>
-                <div class="col d-flex justify-content-end align-items-center gap-3 flex-wrap">
+<body>
+  <script src="/static/vendor/tabler-theme.min.js"></script>
+  <a class="visually-hidden-focusable skip-link" href="#content">Skip to main content</a>
+  <div id="live-announcer" class="visually-hidden" aria-live="polite" aria-atomic="true"></div>
 
-                </div>
+  <div class="page">
+    <aside class="navbar navbar-vertical navbar-expand-lg">
+      <div class="container-fluid">
+        <button class="navbar-toggler" type="button"
+                data-bs-toggle="collapse" data-bs-target="#sidebar-menu"
+                aria-controls="sidebar-menu" aria-expanded="false"
+                aria-label="Toggle sidebar navigation">
+          <span class="navbar-toggler-icon"></span>
+        </button>
+
+        <div class="navbar-brand">
+          <a href="/" data-nav="/" class="d-inline-flex align-items-center gap-2 text-decoration-none text-reset"
+             aria-label="Swift RPC Monitor">
+            <svg class="navbar-brand-icon flex-shrink-0" width="28" height="24" viewBox="0 0 118 94"
+                 aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg">
+              <path transform="matrix(1 0 -.2566 .9665 0 0)"
+                    d="m38.49 6.154c-7.106 0-12.83 5.723-12.83 12.83l-7.53e-4 59.69c0 7.106 5.722 12.83 12.83 12.83h66.12c7.106 0 12.82-5.723 12.82-12.83l7.5e-4 -59.69c0-7.106-5.722-12.83-12.83-12.83h-66.12zm44.41 16.95 13.81 14.27-0.06917 7.094h-52.62l-0.1147-8.978h40.64l-6.693-6.951 5.048-5.431zm-38.45 27.68h52.62l0.1162 8.984h-40.64l6.691 6.945-5.048 5.431-13.81-14.26 0.06764-7.1z"
+                    fill="currentColor" style="paint-order:stroke markers fill"/>
+            </svg>
+            <span class="navbar-brand-title fw-bold">Swift RPC</span>
+          </a>
+        </div>
+
+        <div class="navbar-footer d-none d-lg-block">
+          <button type="button" class="btn btn-ghost-secondary w-100 justify-content-start sidebar-pin-btn"
+                  data-bs-toggle="sidebar-folded"
+                  aria-label="Pin or unpin sidebar"
+                  aria-pressed="true"
+                  title="Pin or unpin sidebar">
+            <svg class="icon flex-shrink-0" width="20" height="20" viewBox="0 0 24 24"
+                 fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                 aria-hidden="true" focusable="false">
+              <path d="M15 4.5l-4 4l-4 1.5l-1.5 1.5l7 7l1.5 -1.5l1.5 -4l4 -4"/>
+              <path d="M9 15l-4.5 4.5"/>
+              <path d="M14.5 4l5.5 5.5"/>
+            </svg>
+            <span class="nav-link-title ms-2" id="sidebar-pin-label">Pin sidebar</span>
+          </button>
+        </div>
+
+        <nav class="collapse navbar-collapse" id="sidebar-menu" aria-label="Monitor navigation">
+          <ul class="navbar-nav pt-lg-3">
+            <li class="nav-section-title">Monitor</li>
+            <li class="nav-item" data-nav-item="/">
+              <a class="nav-link" href="/" data-nav="/">
+                <span class="nav-link-icon d-md-none d-lg-inline-block">
+                  <svg class="icon" width="24" height="24" viewBox="0 0 24 24"
+                       fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                       aria-hidden="true" focusable="false">
+                    <path d="M5 4h4a1 1 0 0 1 1 1v6a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1v-6a1 1 0 0 1 1 -1"/>
+                    <path d="M5 16h4a1 1 0 0 1 1 1v2a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1v-2a1 1 0 0 1 1 -1"/>
+                    <path d="M15 12h4a1 1 0 0 1 1 1v6a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1v-6a1 1 0 0 1 1 -1"/>
+                    <path d="M15 4h4a1 1 0 0 1 1 1v2a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1v-2a1 1 0 0 1 1 -1"/>
+                  </svg>
+                </span>
+                <span class="nav-link-title">Overview</span>
+              </a>
+            </li>
+            <li class="nav-item" data-nav-item="/workers">
+              <a class="nav-link" href="/workers" data-nav="/workers">
+                <span class="nav-link-icon d-md-none d-lg-inline-block">
+                  <svg class="icon" width="24" height="24" viewBox="0 0 24 24"
+                       fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                       aria-hidden="true" focusable="false">
+                    <path d="M3 4m0 3a3 3 0 0 1 3 -3h12a3 3 0 0 1 3 3v2a3 3 0 0 1 -3 3h-12a3 3 0 0 1 -3 -3z"/>
+                    <path d="M3 12m0 3a3 3 0 0 1 3 -3h12a3 3 0 0 1 3 3v2a3 3 0 0 1 -3 3h-12a3 3 0 0 1 -3 -3z"/>
+                    <path d="M7 8l0 .01"/>
+                    <path d="M7 16l0 .01"/>
+                  </svg>
+                </span>
+                <span class="nav-link-title">Workers</span>
+                <span class="badge bg-green-lt ms-auto sidebar-badge" id="nav-badge-workers"
+                      aria-label="Active Workers">0</span>
+              </a>
+            </li>
+            <li class="nav-item" data-nav-item="/methods">
+              <a class="nav-link" href="/methods" data-nav="/methods">
+                <span class="nav-link-icon d-md-none d-lg-inline-block">
+                  <svg class="icon" width="24" height="24" viewBox="0 0 24 24"
+                       fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                       aria-hidden="true" focusable="false">
+                    <path d="M7 8l-4 4l4 4"/>
+                    <path d="M17 8l4 4l-4 4"/>
+                    <path d="M14 4l-4 16"/>
+                  </svg>
+                </span>
+                <span class="nav-link-title">Methods</span>
+              </a>
+            </li>
+            <li class="nav-item" data-nav-item="/requests">
+              <a class="nav-link" href="/requests" data-nav="/requests">
+                <span class="nav-link-icon d-md-none d-lg-inline-block">
+                  <svg class="icon" width="24" height="24" viewBox="0 0 24 24"
+                       fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                       aria-hidden="true" focusable="false">
+                    <path d="M3 12h4l3 8l4 -16l3 8h4"/>
+                  </svg>
+                </span>
+                <span class="nav-link-title">Requests</span>
+                <span class="badge bg-blue-lt ms-auto sidebar-badge d-none" id="nav-badge-requests"
+                      aria-label="Active Requests">0</span>
+              </a>
+            </li>
+          </ul>
+        </nav>
+      </div>
+    </aside>
+
+    <div class="page-wrapper">
+      <header class="monitor-topbar sticky-top border-bottom d-print-none">
+        <div class="container-xl monitor-topbar-inner">
+          <div class="monitor-topbar-left">
+            <span id="service-description" class="fw-semibold text-truncate">Swift RPC</span>
+            <span id="service-version" class="badge bg-secondary-lt d-none"></span>
+            <div class="dropdown" id="broker-endpoints-dropdown">
+              <button type="button" class="btn btn-sm btn-ghost-secondary dropdown-toggle"
+                      data-bs-toggle="dropdown" data-bs-auto-close="outside"
+                      aria-expanded="false" id="broker-endpoints-btn"
+                      title="Broker endpoints">
+                <svg class="icon icon-sm me-1" width="16" height="16" viewBox="0 0 24 24"
+                     fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                     aria-hidden="true" focusable="false">
+                  <path d="M6 12m-3 0a3 3 0 1 0 6 0a3 3 0 1 0 -6 0"/>
+                  <path d="M18 6m-3 0a3 3 0 1 0 6 0a3 3 0 1 0 -6 0"/>
+                  <path d="M18 18m-3 0a3 3 0 1 0 6 0a3 3 0 1 0 -6 0"/>
+                  <path d="M8.7 10.7l6.6 -3.4"/>
+                  <path d="M8.7 13.3l6.6 3.4"/>
+                </svg>
+                <span>Broker</span>
+              </button>
+              <div class="dropdown-menu p-3 monitor-endpoints-menu" aria-labelledby="broker-endpoints-btn">
+                <div class="dropdown-header px-0 pt-0">Broker Endpoints</div>
+                <div id="topbar-broker-endpoints" class="small text-secondary">Waiting for Broker data…</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="monitor-topbar-right">
+            <div class="btn-group btn-group-sm" role="group" aria-label="Time window" id="window-selector">
+              <button type="button" class="btn active" data-window="15m" aria-pressed="true">15m</button>
+              <button type="button" class="btn" data-window="1h" aria-pressed="false">1h</button>
+              <button type="button" class="btn" data-window="12h" aria-pressed="false">12h</button>
+              <button type="button" class="btn" data-window="1d" aria-pressed="false">1d</button>
+              <button type="button" class="btn" data-window="7d" aria-pressed="false">7d</button>
             </div>
 
-            <div class="row border-bottom align-items-center py-2 gap-2">
-                <div class="col d-flex flex-row text-secondary align-items-center" id="server_info"></div>
-                <div class="col-auto d-flex flex-row align-items-center">
-                    <div class="form-check form-switch mb-0">
-                        <input class="form-check-input" type="checkbox" id="auto-refresh" checked>
-                        <label class="form-check-label small" for="auto-refresh">Auto-refresh</label>
-                    </div>
-                </div>
-                <div class="col-auto d-flex flex-row align-items-center">
-                    <div class="btn-group btn-group-sm" role="group" aria-label="Time window" id="window-selector">
-                        <button type="button" class="btn btn-outline-primary active" data-window="15m">15m</button>
-                        <button type="button" class="btn btn-outline-primary" data-window="1h">1h</button>
-                        <button type="button" class="btn btn-outline-primary" data-window="12h">12h</button>
-                        <button type="button" class="btn btn-outline-primary" data-window="1d">1d</button>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </header>
+            <label class="form-check form-switch mb-0 d-inline-flex align-items-center gap-1" title="Toggle auto-refresh">
+              <input class="form-check-input" type="checkbox" id="auto-refresh" checked>
+              <span class="form-check-label small text-nowrap">Auto</span>
+            </label>
 
-    <div class="container-fluid">
-    <div class="row row-cols-1 row-cols-md-4 g-3 text-center" id="stats">
-        <div class="col">
-            <div class="card mb-3 rounded-3 text-primary-emphasis bg-primary-subtle">
-                <div class="card-body">
-                    <div class="fs-3 fw-light" id="uptime">-</div>
-                    <div class="small text-narrow opacity-50">Uptime</div>
-                </div>
-            </div>
+            <button type="button" class="btn btn-sm btn-icon btn-ghost-secondary" id="refresh-now"
+                    aria-label="Refresh now" title="Refresh now">
+              <svg class="icon" width="18" height="18" viewBox="0 0 24 24"
+                   fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                   aria-hidden="true" focusable="false">
+                <path d="M20 11a8.1 8.1 0 0 0 -15.5 -2m-.5 -4v4h4"/>
+                <path d="M4 13a8.1 8.1 0 0 0 15.5 2m.5 4v-4h-4"/>
+              </svg>
+            </button>
+
+            <button type="button" class="btn btn-sm btn-icon btn-ghost-secondary" id="theme-toggle"
+                    aria-label="Toggle light or dark theme" title="Toggle light or dark theme">
+              <svg class="icon hide-theme-dark" width="18" height="18" viewBox="0 0 24 24"
+                   fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                   aria-hidden="true" focusable="false">
+                <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z"/>
+              </svg>
+              <svg class="icon hide-theme-light" width="18" height="18" viewBox="0 0 24 24"
+                   fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                   aria-hidden="true" focusable="false">
+                <path d="M12 12m-4 0a4 4 0 1 0 8 0a4 4 0 1 0 -8 0"/>
+                <path d="M3 12h1m8 -9v1m8 8h1m-9 8v1m-6.4 -15.4l.7 .7m12.1 -.7l-.7 .7m0 11.4l.7 .7m-12.1 -.7l-.7 .7"/>
+              </svg>
+            </button>
+          </div>
         </div>
-        <div class="col">
-            <div class="card mb-3 rounded-3 text-info-emphasis bg-info-subtle">
-                <div class="card-body">
-                    <div class="fs-3 fw-light" id="total_requests">-</div>
-                    <div class="small text-narrow opacity-50">Requests</div>
-                </div>
+      </header>
+
+      <div id="connection-banner" class="container-xl pt-3 d-none">
+        <div class="alert alert-warning d-flex align-items-center justify-content-between gap-2 mb-0" role="alert">
+          <div class="d-flex align-items-center gap-2 min-w-0">
+            <svg class="icon alert-icon flex-shrink-0" width="20" height="20" viewBox="0 0 24 24"
+                 fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                 aria-hidden="true" focusable="false">
+              <path d="M12 9v4"/>
+              <path d="M10.363 3.591l-8.106 13.534a1.914 1.914 0 0 0 1.636 2.871h16.214a1.914 1.914 0 0 0 1.636 -2.87l-8.106 -13.536a1.914 1.914 0 0 0 -3.274 0z"/>
+              <path d="M12 16h.01"/>
+            </svg>
+            <div class="min-w-0">
+              <strong>Connection lost.</strong>
+              <span id="connection-banner-detail">Showing last known data.</span>
             </div>
+          </div>
+          <button type="button" class="btn btn-sm btn-warning flex-shrink-0" id="connection-retry">Retry</button>
         </div>
-        <div class="col">
-            <div class="card mb-3 rounded-3 text-danger-emphasis bg-danger-subtle">
-                <div class="card-body">
-                    <div class="fs-3 fw-light" id="total_errors">-</div>
-                    <div class="small text-narrow opacity-50">Failures</div>
-                </div>
+      </div>
+
+      <main id="content" class="page-body" tabindex="-1">
+        <div class="container-xl" id="page-root"></div>
+      </main>
+
+      <footer class="footer footer-transparent d-print-none">
+        <div class="container-xl">
+          <div class="row text-center align-items-center flex-row-reverse">
+            <div class="col-lg-auto ms-lg-auto">
+              <ul class="list-inline list-inline-dots mb-0">
+                <li class="list-inline-item"><a href="https://github.com/michel4j/swift-rpc/blob/master/README.md" target="_blank" rel="noopener" class="link-secondary">Docs</a></li>
+                <li class="list-inline-item"><a href="https://github.com/michel4j/swift-rpc" target="_blank" rel="noopener" class="link-secondary">Source</a></li>
+                <li class="list-inline-item"><a href="https://pypi.org/project/szrpc/" target="_blank" rel="noopener" class="link-secondary">Releases</a></li>
+                <li class="list-inline-item"><a href="https://github.com/michel4j/swift-rpc/issues" target="_blank" rel="noopener" class="link-secondary">Issues</a></li>
+              </ul>
             </div>
-        </div>
-        <div class="col">
-            <div class="card mb-3 rounded-3 text-success-emphasis bg-success-subtle">
-                <div class="card-body">
-                    <div class="fs-3 fw-light" id="active_workers">-</div>
-                    <div class="small text-narrow opacity-50">Workers</div>
-                </div>
+            <div class="col-12 col-lg-auto mt-3 mt-lg-0">
+              <ul class="list-inline list-inline-dots mb-0 text-secondary">
+                <li class="list-inline-item">Swift RPC Monitor</li>
+                <li class="list-inline-item">Updated <span id="footer-updated">—</span></li>
+              </ul>
             </div>
+          </div>
         </div>
+      </footer>
     </div>
+  </div>
 
-    <!-- Telemetry & Task Duration Plots -->
-    <div class="row g-3 mb-4">
-        <div class="col-12">
-            <div class="card" id="worker-sparklines-card">
-                <div class="card-header py-2 d-flex justify-content-between align-items-center">
-                    <span class="fw-semibold">Workers</span>
-                    <small class="text-secondary window-label">15m</small>
-                </div>
-                <div class="card-body p-0">
-                    <div id="worker-sparklines" class="worker-spark-grid mt-2"></div>
-                </div>
-            </div>
+  <div class="offcanvas offcanvas-end monitor-drawer" tabindex="-1" id="request-details-drawer"
+       aria-labelledby="request-details-title">
+    <div class="offcanvas-header border-bottom">
+      <div class="d-flex flex-column min-w-0 me-2">
+        <h2 class="offcanvas-title h4 mb-0 text-truncate" id="request-details-title">Request Details</h2>
+        <div class="d-flex align-items-center gap-2 mt-1">
+          <code class="small text-secondary text-truncate" id="request-details-id"></code>
+          <button type="button" class="btn btn-sm btn-ghost-secondary py-0 px-1 d-none"
+                  id="request-details-copy-id" aria-label="Copy Request ID" title="Copy Request ID">Copy ID</button>
         </div>
-        <div class="col-12">
-            <div class="card">
-                <div class="card-header py-2 d-flex justify-content-between align-items-center">
-                    <span class="fw-semibold" id="duration-table-title">Task Summary</span>
-                    <small class="text-secondary window-label">15m</small>
-                </div>
-                <div class="card-body p-2">
-                    <div tabindex="0" role="region" aria-labelledby="duration-table-title" class="duration-table-wrapper">
-                        <table class="table table-sm small table-hover mb-0 duration-table">
-                            <thead>
-                            <tr>
-                                <th scope="col">Task Type</th>
-                                <th scope="col" class="num">Calls</th>
-                                <th scope="col" class="num">Errors</th>
-                                <th scope="col" class="num">Min</th>
-                                <th scope="col" class="num">Avg</th>
-                                <th scope="col" class="num">p95</th>
-                                <th scope="col" class="num">Max</th>
-                                <th scope="col" class="num">Payload</th>
-                            </tr>
-                            </thead>
-                            <tbody id="duration-table-body"></tbody>
-                        </table>
-                    </div>
-                </div>
-            </div>
-        </div>
+      </div>
+      <button type="button" class="btn-close text-reset" data-bs-dismiss="offcanvas" aria-label="Close"></button>
     </div>
+    <div class="offcanvas-body" id="request-details-body"></div>
+  </div>
 
-    <!-- Active & Historical Calls -->
-
-    <div class="row align-items-center mb-2 g-2">
-        <div class="card">
-            <div class="card-header d-flex flex-row align-items-center gap-2 flex-wrap">
-                <span class="fw-semibold" id="call-history-title">Call History</span>
-                <div class="ms-auto d-flex gap-2 flex-wrap">
-                    <select id="filter-status" class="form-select form-select-sm" style="width: auto;">
-                        <option value="">All Statuses</option>
-                        <option value="DONE">DONE</option>
-                        <option value="ERROR">ERROR</option>
-                        <option value="ACTIVE">ACTIVE</option>
-                    </select>
-                    <input id="filter-method" type="text" class="form-control form-control-sm" placeholder="Filter method..." style="width: 160px;">
-                    <input id="filter-worker" type="text" class="form-control form-control-sm" placeholder="Filter worker..." style="width: 160px;">
-                </div>
-            </div>
-            <div class="card-body p-2 table-responsive">
-                <table class="table table-sm small table-hover">
-                    <thead>
-                    <tr>
-                        <th>Time</th>
-                        <th>Task ID</th>
-                        <th>Task Type</th>
-                        <th>Worker</th>
-                        <th>Status</th>
-                        <th>Duration</th>
-                    </tr>
-                    </thead>
-                    <tbody id="active-calls-body"></tbody>
-                    <tbody id="historical-calls-body"></tbody>
-                </table>
-            </div>
-            <div class="card-footer">
-                <div class="d-flex justify-content-between align-items-center mb-4">
-                    <small class="text-secondary" id="calls-pagination-info">-</small>
-                    <div class="btn-group btn-group-sm">
-                        <button class="btn btn-outline-secondary" id="prev-page" disabled>Prev</button>
-                        <button class="btn btn-outline-secondary" id="next-page" disabled>Next</button>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-
-        <footer>
-            <div class="row">
-                <div class="col">
-                    <nav class="d-none d-lg-flex small">
-                        <a class="me-3 py-2 text-dark text-decoration-none"
-                           href="https://github.com/michel4j/swift-rpc/blob/master/README.md">Docs</a>
-                        <a class="me-3 py-2 text-dark text-decoration-none" href="https://github.com/michel4j/swift-rpc">Source</a>
-                        <a class="me-3 py-2 text-dark text-decoration-none" href="https://pypi.org/project/szrpc/">Releases</a>
-                        <a class="py-2 text-dark text-decoration-none" href="https://github.com/michel4j/swift-rpc/issues">Issues</a>
-                    </nav>
-                </div>
-            </div>
-        </footer>
-
-    </div>
-
-    <!-- Modal -->
-    <div class="modal fade" id="detailsModal" tabindex="-1" aria-hidden="true">
-        <div class="modal-dialog modal-dialog-centered modal-lg">
-            <div class="modal-content">
-                <div class="modal-header text-bg-primary" data-bs-theme="dark">
-                    <h5 class="modal-title">Job Details</h5>
-                    <button type="button" class="btn-close text-white" data-bs-dismiss="modal"
-                            aria-label="Close"></button>
-                </div>
-                <div class="modal-body">
-                    <pre id="modal-content"></pre>
-                </div>
-            </div>
-        </div>
-    </div>
-
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js"
-        integrity="sha384-FKyoEForCGlyvwx9Hj09JcYn3nv7wiPVlz7YYwJrWVcXK/BmnVDxM+D2scQbITxI"
-        crossorigin="anonymous"></script>
-<script type="module">
-    import {updateWorkerSparklines} from './sparklines.js';
-
-    const PALETTE = ['#0d6efd', '#198754', '#dc3545', '#fd7e14', '#6f42c1', '#20c997', '#0dcaf0', '#6c757d'];
-    const PAGE_SIZE = 20;
-
-    let currentWindow = '15m';
-    let currentOffset = 0;
-    let totalCalls = 0;
-    let lastPlotFetch = 0;
-    let lastActiveWorkers = new Set();
-    let lastWorkerMetrics = {};
-    let lastWorkerMethods = {};
-    let lastMetricsPayload = {series: {}};
-    let lastTasksPayload = {tasks: {}};
-    let sparklinesOffscreen = false;
-
-    function formatDuration(seconds) {
-        if (seconds === null || seconds === undefined) return '-';
-        seconds = Math.abs(Number(seconds));
-        if (seconds > 0 && seconds < 1) return `${(seconds * 1000).toFixed(0)}ms`;
-
-        const days = Math.floor(seconds / (24 * 3600));
-        seconds %= (24 * 3600);
-        const hours = Math.floor(seconds / 3600);
-        seconds %= 3600;
-        const minutes = Math.floor(seconds / 60);
-        const remainingSeconds = Math.floor(seconds % 60);
-
-        const parts = [];
-        if (days > 0) parts.push(`${days}d`);
-        if (hours > 0) parts.push(`${hours}h`);
-        if (minutes > 0) parts.push(`${minutes}m`);
-        if (remainingSeconds > 0 || parts.length === 0) parts.push(`${remainingSeconds}s`);
-        return parts.join(' ');
-    }
-
-    function makeCallRow(call, isActive) {
-        const tr = document.createElement('tr');
-
-        const tdTime = document.createElement('td');
-        tdTime.textContent = call.date_time || '';
-        tr.appendChild(tdTime);
-
-        const tdId = document.createElement('td');
-        const link = document.createElement('a');
-        link.href = '#';
-        link.textContent = call.request_id;
-        link.addEventListener('click', (e) => {
-            e.preventDefault();
-            showDetails(call.request_id);
-        });
-        tdId.appendChild(link);
-        tr.appendChild(tdId);
-
-        const tdMethod = document.createElement('td');
-        tdMethod.textContent = call.method || '';
-        tr.appendChild(tdMethod);
-
-        const tdWorker = document.createElement('td');
-        tdWorker.textContent = call.worker_id || '';
-        tr.appendChild(tdWorker);
-
-        const tdStatus = document.createElement('td');
-        const badge = document.createElement('span');
-        badge.className = `badge bg-light border status-${call.status}`;
-        badge.textContent = call.status;
-        tdStatus.appendChild(badge);
-        tr.appendChild(tdStatus);
-
-        const tdDur = document.createElement('td');
-        tdDur.textContent = isActive
-            ? formatDuration((Date.now() / 1000) - call.start_time)
-            : formatDuration(call.duration);
-        tr.appendChild(tdDur);
-
-        return tr;
-    }
-
-    async function showDetails(requestId) {
-        const modalElement = document.getElementById('detailsModal');
-        const modal = bootstrap.Modal.getOrCreateInstance(modalElement);
-        document.getElementById('modal-content').textContent = 'Loading...';
-        modal.show();
-
-        try {
-            const response = await fetch(`/api/details/${encodeURIComponent(requestId)}`);
-            const data = await response.json();
-            document.getElementById('modal-content').textContent = JSON.stringify(data, null, 2);
-        } catch (e) {
-            document.getElementById('modal-content').textContent = 'Error loading details';
-        }
-    }
-
-    function formatBytes(bytes) {
-        const val = Number(bytes || 0);
-        if (val < 1024) return `${val} B`;
-        if (val < 1024 * 1024) return `${(val / 1024).toFixed(1)} KB`;
-        if (val < 1024 * 1024 * 1024) return `${(val / (1024 * 1024)).toFixed(2)} MB`;
-        return `${(val / (1024 * 1024 * 1024)).toFixed(2)} GB`;
-    }
-
-    function renderSparklines() {
-        updateWorkerSparklines({
-            container: document.getElementById('worker-sparklines'),
-            metricsPayload: lastMetricsPayload,
-            tasksPayload: lastTasksPayload,
-            activeWorkers: lastActiveWorkers,
-            workerMetrics: lastWorkerMetrics,
-            workerMethods: lastWorkerMethods,
-            palette: PALETTE,
-            formatDuration,
-            offscreen: sparklinesOffscreen,
-        });
-    }
-
-    function updateDurationTable(summaryPayload) {
-        const methods = summaryPayload.methods || [];
-        const tbody = document.getElementById('duration-table-body');
-        if (methods.length === 0) {
-            const tr = document.createElement('tr');
-            tr.className = 'empty-row';
-            const td = document.createElement('td');
-            td.colSpan = 8;
-            td.className = 'text-secondary text-center py-3';
-            td.textContent = 'No tasks recorded in this window.';
-            tr.appendChild(td);
-            tbody.replaceChildren(tr);
-            return;
-        }
-
-        const rows = methods.map(m => {
-            const tr = document.createElement('tr');
-
-            const th = document.createElement('th');
-            th.scope = 'row';
-            th.textContent = m.method || '';
-            tr.appendChild(th);
-
-            const cells = [
-                {text: String(m.count ?? 0)},
-                {text: String(m.errors ?? 0), cls: (m.errors || 0) > 0 ? 'num text-danger fw-semibold' : 'num'},
-                {text: formatDuration(m.min_duration)},
-                {text: formatDuration(m.avg_duration)},
-                {text: formatDuration(m.p95_duration)},
-                {text: formatDuration(m.max_duration)},
-                {text: formatBytes(m.total_bytes)},
-            ];
-            cells.forEach(({text, cls}) => {
-                const td = document.createElement('td');
-                td.className = cls || 'num';
-                td.textContent = text;
-                tr.appendChild(td);
-            });
-            return tr;
-        });
-
-        tbody.replaceChildren(...rows);
-    }
-
-    async function fetchCalls() {
-        const params = new URLSearchParams({
-            window: currentWindow,
-            limit: String(PAGE_SIZE),
-            offset: String(currentOffset),
-        });
-        const status = document.getElementById('filter-status').value;
-        const method = document.getElementById('filter-method').value.trim();
-        const worker = document.getElementById('filter-worker').value.trim();
-        if (status) params.set('status', status);
-        if (method) params.set('method', method);
-        if (worker) params.set('worker_id', worker);
-
-        const res = await fetch(`/api/calls?${params.toString()}`);
-        const payload = await res.json();
-        totalCalls = payload.total || 0;
-
-        const historicalBody = document.getElementById('historical-calls-body');
-        historicalBody.replaceChildren(...(payload.calls || []).map(c => makeCallRow(c, false)));
-
-        const start = totalCalls === 0 ? 0 : currentOffset + 1;
-        const end = Math.min(currentOffset + PAGE_SIZE, totalCalls);
-        document.getElementById('calls-pagination-info').textContent =
-            `Showing ${start}-${end} of ${totalCalls} (${currentWindow})`;
-        document.getElementById('prev-page').disabled = currentOffset <= 0;
-        document.getElementById('next-page').disabled = currentOffset + PAGE_SIZE >= totalCalls;
-    }
-
-    async function fetchPlots() {
-        const [metricsRes, tasksRes, summaryRes] = await Promise.all([
-            fetch(`/api/metrics/workers?window=${encodeURIComponent(currentWindow)}`),
-            fetch(`/api/metrics/tasks?window=${encodeURIComponent(currentWindow)}`),
-            fetch(`/api/summary?window=${encodeURIComponent(currentWindow)}`),
-        ]);
-        lastMetricsPayload = await metricsRes.json();
-        lastTasksPayload = await tasksRes.json();
-        renderSparklines();
-        updateDurationTable(await summaryRes.json());
-        lastPlotFetch = Date.now();
-    }
-
-    async function updateData(forcePlots = false) {
-        try {
-            const response = await fetch('/api/data');
-            const data = await response.json();
-
-            const nextActive = new Set(data.workers || []);
-            const workersChanged =
-                nextActive.size !== lastActiveWorkers.size ||
-                Array.from(nextActive).some(w => !lastActiveWorkers.has(w));
-            lastActiveWorkers = nextActive;
-            lastWorkerMetrics = data.worker_metrics || {};
-            const nextWorkerMethods = data.worker_methods || {};
-            const methodsChanged = JSON.stringify(nextWorkerMethods) !== JSON.stringify(lastWorkerMethods);
-            lastWorkerMethods = nextWorkerMethods;
-
-            document.getElementById('server_description').textContent = data.description || '';
-            document.getElementById('uptime').textContent = formatDuration(data.stats.uptime);
-            document.getElementById('total_requests').textContent = data.stats.total_requests;
-            document.getElementById('total_errors').textContent = data.stats.total_errors;
-            document.getElementById('active_workers').textContent = data.stats.active_workers_count;
-            document.getElementById('server_version').title = `Swift RPC Server ${data.version || ''}`;
-
-            const serverInfo = document.getElementById('server_info');
-            const items = [
-                ['frontend', data.frontend || ''],
-                ['backend', data.backend || ''],
-                ['publish', data.publish || ''],
-                ['subscribe', data.subscribe || ''],
-            ];
-            serverInfo.replaceChildren(...items.map(([k, v]) => {
-                if (v === '') {
-                    return '';
-                }
-                const wrap = document.createElement('div');
-                wrap.append(`${k}: `);
-                const span = document.createElement('span');
-                span.className = 'server-value';
-                span.textContent = v;
-                wrap.appendChild(span);
-                return wrap;
-            }));
-
-            const activeBody = document.getElementById('active-calls-body');
-            activeBody.replaceChildren(...(data.active_calls || []).map(c => makeCallRow(c, true)));
-
-            await fetchCalls();
-
-            if (forcePlots || Date.now() - lastPlotFetch >= 5000) {
-                await fetchPlots();
-            } else if (workersChanged || methodsChanged) {
-                renderSparklines();
-            }
-        } catch (e) {
-            console.error('Failed to fetch data', e);
-        }
-    }
-
-    document.getElementById('worker-sparklines-card').addEventListener('contentvisibilityautostatechange', (event) => {
-        sparklinesOffscreen = event.skipped;
-        if (!event.skipped) {
-            renderSparklines();
-        }
-    });
-
-    document.querySelectorAll('#window-selector button').forEach(btn => {
-        btn.addEventListener('click', () => {
-            document.querySelectorAll('#window-selector button').forEach(b => b.classList.remove('active'));
-            btn.classList.add('active');
-            currentWindow = btn.dataset.window;
-            currentOffset = 0;
-            document.querySelectorAll('.window-label').forEach(el => { el.textContent = currentWindow; });
-            updateData(true);
-        });
-    });
-
-    ['filter-status', 'filter-method', 'filter-worker'].forEach(id => {
-        document.getElementById(id).addEventListener('change', () => {
-            currentOffset = 0;
-            fetchCalls();
-        });
-    });
-
-    document.getElementById('prev-page').addEventListener('click', () => {
-        currentOffset = Math.max(0, currentOffset - PAGE_SIZE);
-        fetchCalls();
-    });
-
-    document.getElementById('next-page').addEventListener('click', () => {
-        if (currentOffset + PAGE_SIZE < totalCalls) {
-            currentOffset += PAGE_SIZE;
-            fetchCalls();
-        }
-    });
-
-    setInterval(() => {
-        if (document.getElementById('auto-refresh').checked) {
-            updateData(false);
-        }
-    }, 1000);
-
-    updateData(true);
-
-</script>
+  <script src="/static/vendor/tabler.min.js" defer></script>
+  <script type="module" src="/static/js/app.js"></script>
 </body>
 </html>

@@ -139,11 +139,14 @@ def test_sqlite_store_persistence_and_windowed_queries(tmp_path):
         assert asyncio.run(routes['/api/calls'](window='15m', status=None, method=None, worker_id=None, limit=10, offset=0))['total'] == 2
         index_resp = asyncio.run(routes['/']())
         html = index_resp.path.read_text(encoding='utf-8')
-        assert 'id="worker-sparklines-card"' in html
-        assert 'id="worker-sparklines"' in html
-        assert 'id="duration-table-body"' in html
+        assert 'data-bs-sidebar="folded-hover"' in html
+        assert 'id="page-root"' in html
+        assert 'id="request-details-drawer"' in html
+        assert 'id="live-announcer"' in html
+        assert '/static/css/monitor.css' in html
+        assert '/static/js/app.js' in html
+        assert 'cdn.jsdelivr.net' not in html.lower()
         assert 'chart.js' not in html.lower()
-        assert "from './sparklines.js'" in html
 
         sparklines_resp = asyncio.run(routes['/sparklines.js']())
         assert sparklines_resp.media_type == 'text/javascript'
@@ -373,6 +376,15 @@ def test_monitor_static_assets_and_spa_routes():
             ('vendor/tabler.min.css', 'text/css'),
             ('vendor/tabler.min.js', 'javascript'),
             ('vendor/tabler-theme.min.js', 'javascript'),
+            ('css/monitor.css', 'text/css'),
+            ('js/app.js', 'javascript'),
+            ('js/router.js', 'javascript'),
+            ('js/format.js', 'javascript'),
+            ('js/drawer.js', 'javascript'),
+            ('js/pages/overview.js', 'javascript'),
+            ('js/pages/workers.js', 'javascript'),
+            ('js/pages/methods.js', 'javascript'),
+            ('js/pages/requests.js', 'javascript'),
             ('sparklines.js', 'javascript'),
         ):
             scope = {'type': 'http', 'method': 'GET', 'headers': []}
