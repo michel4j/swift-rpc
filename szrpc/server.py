@@ -778,7 +778,6 @@ class Server(object):
             w_methods = worker_methods.get(worker, set())
             if not w_methods or method in w_methods:
                 return worker_queue.pop(i)
-        logger.warning(f'No available workers support method `{method}`!')
         return worker_queue.pop(0)
 
     def _open_broker_transport(self) -> BrokerTransport:
