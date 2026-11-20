@@ -6,6 +6,7 @@
 export const REQUESTS_PAGE_SIZE = 15;
 
 const VALID_STATUS_FILTERS = new Set(['DONE', 'ERROR']);
+const VALID_DURATION_FILTERS = new Set(['p5', 'p95']);
 
 const HTML_ESCAPE_MAP = {
   '&': '&amp;',
@@ -102,6 +103,14 @@ export function computeElapsedSeconds(startTime, nowSeconds = Date.now() / 1000)
 export function normalizeStatusParam(raw) {
   const val = String(raw ?? '').trim().toUpperCase();
   return VALID_STATUS_FILTERS.has(val) ? val : '';
+}
+
+/**
+ * Normalize a duration filter query parameter to `'p5'`, `'p95'`, or `''` (All).
+ */
+export function normalizeDurationParam(raw) {
+  const val = String(raw ?? '').trim().toLowerCase();
+  return VALID_DURATION_FILTERS.has(val) ? val : '';
 }
 
 /**

@@ -489,6 +489,56 @@ def test_get_calls_excludes_active_rows_for_unfiltered_pagination():
         monitor.close()
 
 
+def test_api_calls_duration_percentile_filters():
+    import asyncio
+    import time
+    mon_mod = pytest.importorskip('szrpc.monitor')
+    monitor = mon_mod.Monitor(service_info={'description': 'DurFilter', 'methods': ('op',)}, db_path=':memory:')
+    try:
+        now = time.time()
+        for idx in range(1, 21):
+            monitor.store.enqueue_call({
+                'request_id': f'dur-{idx}',
+                'client_id': 'c-1',
+                'method': 'op',
+                'signature': '',
+                'worker_id': 'w-1' if idx <= 10 else 'w-2',
+                'start_time': now - (21 - idx),
+                'end_time': now - (21 - idx) + float(idx),
+                'duration': float(idx),
+                'queue_wait': 0.01,
+                'status': 'DONE',
+                'sent_bytes': 10,
+                'updates': 1,
+                'kwargs_json': '{}',
+                'results_json': '[]',
+            })
+        monitor.flush()
+
+        app = mon_mod.create_app(monitor)
+        routes = {r.path: r.endpoint for r in app.routes if hasattr(r, 'endpoint')}
+
+        p5_res = asyncio.run(routes['/api/calls'](window='15m', status=None, method=None, worker_id=None, duration='p5', limit=25, offset=0))
+        assert p5_res['total'] == 1
+        assert [c['request_id'] for c in p5_res['calls']] == ['dur-1']
+
+        p95_res = asyncio.run(routes['/api/calls'](window='15m', status=None, method=None, worker_id=None, duration='p95', limit=25, offset=0))
+        assert p95_res['total'] == 1
+        assert [c['request_id'] for c in p95_res['calls']] == ['dur-20']
+
+        # Combined with worker_id filter (only dur-1..dur-10)
+        p95_w1 = asyncio.run(routes['/api/calls'](window='15m', status=None, method=None, worker_id='w-1', duration='p95', limit=25, offset=0))
+        assert p95_w1['total'] == 1
+        assert [c['request_id'] for c in p95_w1['calls']] == ['dur-10']
+
+        # Empty set returns 0 cleanly
+        empty_p5 = asyncio.run(routes['/api/calls'](window='15m', status=None, method='missing', worker_id=None, duration='p5', limit=25, offset=0))
+        assert empty_p5['total'] == 0
+        assert empty_p5['calls'] == []
+    finally:
+        monitor.close()
+
+
 def test_monitor_js_unit_tests():
     import shutil
     import subprocess

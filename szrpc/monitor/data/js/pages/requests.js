@@ -4,8 +4,8 @@
  * Top card: Live Active Requests (`card-status-top bg-primary`, 1s `/api/data`),
  * respecting active Method/Worker filters and hidden when 0 matching active Requests.
  * Bottom card: Paginated Historical Requests (2s `/api/calls`, page size 25),
- * with Status (`All`/`DONE`/`ERROR`), exact-match Method & Worker datalist filters
- * (250ms debounce + immediate `change`/Enter), Clear button, and Prev/Next pagination.
+ * with Status (`All`/`DONE`/`ERROR`), exact-match Method & Worker dropdowns,
+ * Duration percentile dropdown (`All`/`P5`/`P95`), Clear button, and Prev/Next pagination.
  *
  * Pure, DOM-independent helpers are exported for direct unit testing under `node --test`.
  * View lifecycle exports: `mount(container, ctx)`, `update(ctx)`, `unmount()`.
@@ -21,15 +21,14 @@ import {
   formatCallTimestamp,
   formatDisplayMethod,
   formatDuration,
+  normalizeDurationParam,
   normalizeStatusParam,
   statusBadgeClass,
   toFiniteNumber,
 } from '../format.js';
 import { buildUrl } from '../router.js';
 
-export { REQUESTS_PAGE_SIZE, normalizeStatusParam };
-
-const DEBOUNCE_MS = 250;
+export { REQUESTS_PAGE_SIZE, normalizeDurationParam, normalizeStatusParam };
 
 /**
  * Filter live active Requests by exact-match `method` and `worker` filters
@@ -209,21 +208,11 @@ let els = null;
 let lastActiveSig = null;
 let activeElapsedMap = new Map();
 let lastHistorySig = null;
-let lastMethodsDatalistSig = '';
-let lastWorkersDatalistSig = '';
+let lastMethodsSelectSig = '';
+let lastWorkersSelectSig = '';
 let seenMethods = new Set();
 let seenWorkers = new Set();
 let pendingPagination = { prevOffset: 0, nextOffset: REQUESTS_PAGE_SIZE };
-const debounceTimers = { method: null, worker: null };
-
-function clearDebounceTimers() {
-  for (const key of Object.keys(debounceTimers)) {
-    if (debounceTimers[key] !== null) {
-      clearTimeout(debounceTimers[key]);
-      debounceTimers[key] = null;
-    }
-  }
-}
 
 function buildRequestHref(ctx, reqId) {
   const query = { ...(ctx?.state?.query || {}), window: ctx?.state?.window || '15m', request: reqId };
@@ -250,32 +239,27 @@ function buildShellHtml(win) {
           <h2 class="card-title mb-0">Historical Requests</h2>
           <span class="badge bg-secondary-lt font-mono" data-history-total>0</span>
         </div>
-        <div class="requests-filter-bar ms-auto" role="search" aria-label="Filter Requests">
+        <search class="requests-filter-bar ms-auto" aria-label="Filter Requests">
           <select class="form-select form-select-sm" data-filter-status aria-label="Filter by status">
-            <option value="">All</option>
+            <option value="">All Statuses</option>
             <option value="DONE">DONE</option>
             <option value="ERROR">ERROR</option>
           </select>
-          <input type="text"
-                 class="form-control form-control-sm font-mono"
-                 list="requests-methods-list"
-                 data-filter-method
-                 placeholder="Method (exact)..."
-                 aria-label="Filter by exact Method"
-                 autocomplete="off">
-          <datalist id="requests-methods-list" data-methods-datalist></datalist>
-          <input type="text"
-                 class="form-control form-control-sm font-mono"
-                 list="requests-workers-list"
-                 data-filter-worker
-                 placeholder="Worker (exact)..."
-                 aria-label="Filter by exact Worker"
-                 autocomplete="off">
-          <datalist id="requests-workers-list" data-workers-datalist></datalist>
+          <select class="form-select form-select-sm font-mono" data-filter-method aria-label="Filter by Method">
+            <option value="">All Methods</option>
+          </select>
+          <select class="form-select form-select-sm font-mono" data-filter-worker aria-label="Filter by Worker">
+            <option value="">All Workers</option>
+          </select>
+          <select class="form-select form-select-sm" data-filter-duration aria-label="Filter by Duration">
+            <option value="">All Durations</option>
+            <option value="p5">Shortest (P5)</option>
+            <option value="p95">Longest (P95)</option>
+          </select>
           <button type="button"
                   class="btn btn-sm btn-ghost-secondary d-none"
                   data-clear-filters>Clear</button>
-        </div>
+        </search>
       </div>
 
       <div class="table-responsive small">
@@ -342,8 +326,9 @@ function updateClearButtonVisibility(query) {
     normalizeStatusParam(query?.status)
     || String(query?.method ?? '').trim()
     || String(query?.worker ?? '').trim()
-    || els.methodInput.value.trim()
-    || els.workerInput.value.trim(),
+    || normalizeDurationParam(query?.duration)
+    || els.methodSelect.value.trim()
+    || els.workerSelect.value.trim(),
   );
   els.clearBtn.classList.toggle('d-none', !hasFilter);
 }
@@ -353,45 +338,54 @@ function syncControlsFromQuery(query) {
   const status = normalizeStatusParam(query?.status);
   const method = String(query?.method ?? '').trim();
   const worker = String(query?.worker ?? '').trim();
+  const duration = normalizeDurationParam(query?.duration);
 
   if (els.statusSelect.value !== status) {
     els.statusSelect.value = status;
   }
-  if (document.activeElement !== els.methodInput && debounceTimers.method === null && els.methodInput.value !== method) {
-    els.methodInput.value = method;
+  if (els.methodSelect.value !== method) {
+    els.methodSelect.value = method;
   }
-  if (document.activeElement !== els.workerInput && debounceTimers.worker === null && els.workerInput.value !== worker) {
-    els.workerInput.value = worker;
+  if (els.workerSelect.value !== worker) {
+    els.workerSelect.value = worker;
+  }
+  if (els.durationSelect.value !== duration) {
+    els.durationSelect.value = duration;
   }
   updateClearButtonVisibility(query);
 }
 
-function patchDatalists(data, calls) {
+function patchFilterSelects(data, calls, query) {
   if (!els) return;
+  const currentMethod = String(query?.method ?? '').trim();
+  const currentWorker = String(query?.worker ?? '').trim();
+
   const { methods, workers } = collectKnownMethodsAndWorkers({
     data,
     calls,
-    extraMethods: seenMethods,
-    extraWorkers: seenWorkers,
+    extraMethods: currentMethod ? [currentMethod, ...seenMethods] : seenMethods,
+    extraWorkers: currentWorker ? [currentWorker, ...seenWorkers] : seenWorkers,
   });
 
   for (const m of methods) seenMethods.add(m);
   for (const w of workers) seenWorkers.add(w);
 
   const methodsSig = JSON.stringify(methods);
-  if (methodsSig !== lastMethodsDatalistSig) {
-    lastMethodsDatalistSig = methodsSig;
-    els.methodsDatalist.innerHTML = methods
-      .map((m) => `<option value="${escapeHtml(m)}"></option>`)
+  if (methodsSig !== lastMethodsSelectSig) {
+    lastMethodsSelectSig = methodsSig;
+    els.methodSelect.innerHTML = '<option value="">All Methods</option>' + methods
+      .map((m) => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`)
       .join('');
+    els.methodSelect.value = currentMethod;
   }
 
   const workersSig = JSON.stringify(workers);
-  if (workersSig !== lastWorkersDatalistSig) {
-    lastWorkersDatalistSig = workersSig;
-    els.workersDatalist.innerHTML = workers
-      .map((w) => `<option value="${escapeHtml(w)}"></option>`)
+  if (workersSig !== lastWorkersSelectSig) {
+    lastWorkersSelectSig = workersSig;
+    els.workerSelect.innerHTML = '<option value="">All Workers</option>' + workers
+      .map((w) => `<option value="${escapeHtml(w)}">${escapeHtml(w)}</option>`)
       .join('');
+    els.workerSelect.value = currentWorker;
   }
 }
 
@@ -489,7 +483,8 @@ function patchHistoryCard(ctx) {
   const statusFilter = normalizeStatusParam(query.status);
   const methodFilter = String(query.method ?? '').trim();
   const workerFilter = String(query.worker ?? '').trim();
-  const hasFilters = Boolean(statusFilter || methodFilter || workerFilter);
+  const durationFilter = normalizeDurationParam(query.duration);
+  const hasFilters = Boolean(statusFilter || methodFilter || workerFilter || durationFilter);
   const callsPayload = ctx.state.calls;
 
   if (!callsPayload) {
@@ -535,6 +530,7 @@ function patchHistoryCard(ctx) {
     statusFilter,
     methodFilter,
     workerFilter,
+    durationFilter,
     offset,
     page.total,
     rows.map((c) => [
@@ -611,84 +607,49 @@ function patchHistoryCard(ctx) {
 function render(ctx) {
   if (!root || !els || !ctx) return;
   const win = ctx.state.window || '15m';
+  const query = ctx.state.query || {};
   els.windowLabel.textContent = win;
-  syncControlsFromQuery(ctx.state.query || {});
-  patchDatalists(ctx.state.data, ctx.state.calls);
+  patchFilterSelects(ctx.state.data, ctx.state.calls, query);
+  syncControlsFromQuery(query);
   patchActiveCard(ctx);
   patchHistoryCard(ctx);
 }
 
-function commitTextFilter(field, inputEl) {
-  if (!currentCtx || !inputEl) return;
-  if (debounceTimers[field] !== null) {
-    clearTimeout(debounceTimers[field]);
-    debounceTimers[field] = null;
-  }
-  const nextVal = inputEl.value.trim();
-  const prevVal = String(currentCtx.state.query?.[field] ?? '').trim();
-  updateClearButtonVisibility(currentCtx.state.query || {});
-  if (nextVal !== prevVal) {
-    currentCtx.replaceQuery({ [field]: nextVal || null, offset: null }, { push: false });
-  }
-}
-
-function scheduleTextFilter(field, inputEl) {
-  if (debounceTimers[field] !== null) {
-    clearTimeout(debounceTimers[field]);
-  }
-  updateClearButtonVisibility(currentCtx?.state?.query || {});
-  debounceTimers[field] = setTimeout(() => {
-    debounceTimers[field] = null;
-    commitTextFilter(field, inputEl);
-  }, DEBOUNCE_MS);
+function commitSelectFilter(field, value) {
+  if (!currentCtx) return;
+  currentCtx.replaceQuery({ [field]: value || null, offset: null }, { push: false });
 }
 
 function handleStatusChange() {
-  if (!currentCtx || !els) return;
-  const nextStatus = normalizeStatusParam(els.statusSelect.value);
-  currentCtx.replaceQuery({ status: nextStatus || null, offset: null }, { push: false });
-}
-
-function handleMethodInput() {
-  scheduleTextFilter('method', els?.methodInput);
+  if (!els) return;
+  commitSelectFilter('status', normalizeStatusParam(els.statusSelect.value));
 }
 
 function handleMethodChange() {
-  commitTextFilter('method', els?.methodInput);
-}
-
-function handleMethodKeydown(event) {
-  if (event.key === 'Enter') {
-    event.preventDefault();
-    commitTextFilter('method', els?.methodInput);
-  }
-}
-
-function handleWorkerInput() {
-  scheduleTextFilter('worker', els?.workerInput);
+  if (!els) return;
+  commitSelectFilter('method', els.methodSelect.value.trim());
 }
 
 function handleWorkerChange() {
-  commitTextFilter('worker', els?.workerInput);
+  if (!els) return;
+  commitSelectFilter('worker', els.workerSelect.value.trim());
 }
 
-function handleWorkerKeydown(event) {
-  if (event.key === 'Enter') {
-    event.preventDefault();
-    commitTextFilter('worker', els?.workerInput);
-  }
+function handleDurationChange() {
+  if (!els) return;
+  commitSelectFilter('duration', normalizeDurationParam(els.durationSelect.value));
 }
 
 function handleRootClick(event) {
   if (!currentCtx || !els) return;
 
   if (event.target.closest('[data-clear-filters]')) {
-    clearDebounceTimers();
     els.statusSelect.value = '';
-    els.methodInput.value = '';
-    els.workerInput.value = '';
+    els.methodSelect.value = '';
+    els.workerSelect.value = '';
+    els.durationSelect.value = '';
     currentCtx.replaceQuery(
-      { status: null, method: null, worker: null, offset: null },
+      { status: null, method: null, worker: null, duration: null, offset: null },
       { push: false },
     );
     return;
@@ -715,12 +676,11 @@ function handleRootClick(event) {
 export function mount(container, ctx) {
   root = container;
   currentCtx = ctx;
-  clearDebounceTimers();
   lastActiveSig = null;
   activeElapsedMap = new Map();
   lastHistorySig = null;
-  lastMethodsDatalistSig = '';
-  lastWorkersDatalistSig = '';
+  lastMethodsSelectSig = '';
+  lastWorkersSelectSig = '';
   seenMethods = new Set();
   seenWorkers = new Set();
 
@@ -734,10 +694,9 @@ export function mount(container, ctx) {
     activeTbody: root.querySelector('[data-active-tbody]'),
     historyTotal: root.querySelector('[data-history-total]'),
     statusSelect: root.querySelector('[data-filter-status]'),
-    methodInput: root.querySelector('[data-filter-method]'),
-    workerInput: root.querySelector('[data-filter-worker]'),
-    methodsDatalist: root.querySelector('[data-methods-datalist]'),
-    workersDatalist: root.querySelector('[data-workers-datalist]'),
+    methodSelect: root.querySelector('[data-filter-method]'),
+    workerSelect: root.querySelector('[data-filter-worker]'),
+    durationSelect: root.querySelector('[data-filter-duration]'),
     clearBtn: root.querySelector('[data-clear-filters]'),
     historyTbody: root.querySelector('[data-history-tbody]'),
     paginationSummary: root.querySelector('[data-pagination-summary]'),
@@ -746,12 +705,9 @@ export function mount(container, ctx) {
   };
 
   els.statusSelect?.addEventListener('change', handleStatusChange);
-  els.methodInput?.addEventListener('input', handleMethodInput);
-  els.methodInput?.addEventListener('change', handleMethodChange);
-  els.methodInput?.addEventListener('keydown', handleMethodKeydown);
-  els.workerInput?.addEventListener('input', handleWorkerInput);
-  els.workerInput?.addEventListener('change', handleWorkerChange);
-  els.workerInput?.addEventListener('keydown', handleWorkerKeydown);
+  els.methodSelect?.addEventListener('change', handleMethodChange);
+  els.workerSelect?.addEventListener('change', handleWorkerChange);
+  els.durationSelect?.addEventListener('change', handleDurationChange);
   root.addEventListener('click', handleRootClick);
 
   render(ctx);
@@ -763,14 +719,10 @@ export function update(ctx) {
 }
 
 export function unmount() {
-  clearDebounceTimers();
   els?.statusSelect?.removeEventListener('change', handleStatusChange);
-  els?.methodInput?.removeEventListener('input', handleMethodInput);
-  els?.methodInput?.removeEventListener('change', handleMethodChange);
-  els?.methodInput?.removeEventListener('keydown', handleMethodKeydown);
-  els?.workerInput?.removeEventListener('input', handleWorkerInput);
-  els?.workerInput?.removeEventListener('change', handleWorkerChange);
-  els?.workerInput?.removeEventListener('keydown', handleWorkerKeydown);
+  els?.methodSelect?.removeEventListener('change', handleMethodChange);
+  els?.workerSelect?.removeEventListener('change', handleWorkerChange);
+  els?.durationSelect?.removeEventListener('change', handleDurationChange);
   root?.removeEventListener('click', handleRootClick);
 
   root = null;
@@ -779,8 +731,8 @@ export function unmount() {
   lastActiveSig = null;
   activeElapsedMap = new Map();
   lastHistorySig = null;
-  lastMethodsDatalistSig = '';
-  lastWorkersDatalistSig = '';
+  lastMethodsSelectSig = '';
+  lastWorkersSelectSig = '';
   seenMethods = new Set();
   seenWorkers = new Set();
 }

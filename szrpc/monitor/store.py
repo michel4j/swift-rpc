@@ -529,10 +529,13 @@ class SqliteMonitorStore:
         status: str | None = None,
         method: str | None = None,
         worker_id: str | None = None,
+        duration: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> dict[str, Any]:
         """Return paginated and filtered call records ordered newest-first."""
+        duration_filter = duration.strip().lower() if isinstance(duration, str) else ''
+
         def _query() -> tuple[int, list[dict[str, Any]]]:
             with self._db_lock:
                 query = self.CallRecord.select()
@@ -547,6 +550,29 @@ class SqliteMonitorStore:
                     query = query.where(self.CallRecord.method == method)
                 if worker_id:
                     query = query.where(self.CallRecord.worker_id == worker_id)
+
+                if duration_filter in ('p5', 'p95'):
+                    dur_query = (
+                        query.where(self.CallRecord.duration.is_null(False))
+                        .select(self.CallRecord.duration)
+                        .order_by(self.CallRecord.duration.asc())
+                    )
+                    dur_rows = [float(r[0]) for r in dur_query.tuples()]
+                    if not dur_rows:
+                        return 0, []
+                    n = len(dur_rows)
+                    if duration_filter == 'p5':
+                        threshold = dur_rows[max(0, min(n - 1, int(0.05 * (n - 1))))]
+                        query = query.where(
+                            self.CallRecord.duration.is_null(False)
+                            & (self.CallRecord.duration <= threshold)
+                        )
+                    else:
+                        threshold = dur_rows[max(0, min(n - 1, int(0.95 * n)))]
+                        query = query.where(
+                            self.CallRecord.duration.is_null(False)
+                            & (self.CallRecord.duration >= threshold)
+                        )
 
                 total = query.count()
                 rows = query.order_by(self.CallRecord.start_time.desc()).limit(limit).offset(offset)

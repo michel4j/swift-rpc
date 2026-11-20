@@ -52,6 +52,7 @@ import {
   computePaginationRange,
   filterActiveCalls,
   filterHistoricalCalls,
+  normalizeDurationParam,
   normalizeStatusParam,
 } from '../../szrpc/monitor/data/js/pages/requests.js';
 
@@ -661,6 +662,14 @@ describe('pages/requests.js', () => {
     assert.equal(normalizeStatusParam('ACTIVE'), '');
     assert.equal(normalizeStatusParam('all'), '');
     assert.equal(normalizeStatusParam(null), '');
+  });
+
+  it('normalizes duration query parameters', () => {
+    assert.equal(normalizeDurationParam('p5'), 'p5');
+    assert.equal(normalizeDurationParam('P95'), 'p95');
+    assert.equal(normalizeDurationParam('p50'), '');
+    assert.equal(normalizeDurationParam('all'), '');
+    assert.equal(normalizeDurationParam(null), '');
   });
 
   it('filters active calls by exact method and worker match', () => {

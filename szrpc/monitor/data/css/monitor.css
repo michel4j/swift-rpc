@@ -410,6 +410,7 @@ button.worker-method-tag:hover {
 .requests-filter-bar .form-select-sm {
   width: auto;
   min-width: 6.5rem;
+  max-width: 14rem;
 }
 
 .requests-filter-bar .form-control-sm {

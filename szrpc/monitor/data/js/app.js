@@ -11,6 +11,7 @@ import {
   copyText,
   escapeHtml,
   isAbortError,
+  normalizeDurationParam,
   normalizeStatusParam,
   resolveTablerComponent,
 } from './format.js';
@@ -272,6 +273,7 @@ async function fetchCalls(signal) {
   const status = normalizeStatusParam(state.query.status);
   const method = state.query.method;
   const workerId = state.query.worker;
+  const duration = normalizeDurationParam(state.query.duration);
 
   const params = new URLSearchParams({
     window: state.window,
@@ -281,6 +283,7 @@ async function fetchCalls(signal) {
   if (status) params.set('status', status);
   if (method) params.set('method', String(method));
   if (workerId) params.set('worker_id', String(workerId));
+  if (duration) params.set('duration', duration);
 
   const payload = await fetchJson(`/api/calls?${params.toString()}`, signal);
   if (!signal?.aborted) {

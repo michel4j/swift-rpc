@@ -323,6 +323,7 @@ class Monitor:
         status: str | None = None,
         method: str | None = None,
         worker_id: str | None = None,
+        duration: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> Dict[str, Any]:
@@ -331,6 +332,7 @@ class Monitor:
             status=status,
             method=method,
             worker_id=worker_id,
+            duration=duration,
             limit=limit,
             offset=offset,
         )
@@ -392,6 +394,7 @@ def create_app(monitor: Monitor) -> FastAPI:
         status: Optional[str] = Query(default=None),
         method: Optional[str] = Query(default=None),
         worker_id: Optional[str] = Query(default=None),
+        duration: Optional[str] = Query(default=None),
         limit: int = Query(default=50, ge=1, le=500),
         offset: int = Query(default=0, ge=0),
     ):
@@ -400,6 +403,7 @@ def create_app(monitor: Monitor) -> FastAPI:
             status=status,
             method=method,
             worker_id=worker_id,
+            duration=duration,
             limit=limit,
             offset=offset,
         )
