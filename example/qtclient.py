@@ -1,42 +1,37 @@
 
 import time
+import sys
 import random
 from threading import Thread
 
-import gi
-gi.require_version('Gtk', '3.0')
-from gi.repository import Gtk, GLib
+from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import Slot
 
 from szrpc import log
 from szrpc.client import Client
 
 # use GObject based result class
-Client.use('szrpc.result.gresult.GResult')
-
+Client.use('szrpc.result.qresult.QResult')
 logger = log.get_module_logger('client')
 
 
-def gtk_heartbeat():
-    print('Gtk Heartbeat ...')
-    return True
-
-
-class App:
+class App(QApplication):
 
     def __init__(self):
         self.results = []
         self.client = Client('tcp://localhost:9990', heartbeat=1)
+        super().__init__(sys.argv)
 
-    @staticmethod
-    def on_done(res, data):
+    @Slot(object, object)
+    def on_done(self, res, data):
         logger.info(f"DONE: {res}, {data!r}")
 
-    @staticmethod
-    def on_err(res, data):
+    @Slot(object, object)
+    def on_err(self, res, data):
         logger.info(f"ERROR: {res}, {data!r}")
 
-    @staticmethod
-    def on_update(res, data):
+    @Slot(object, object)
+    def on_update(self, res, data):
         logger.info(f"UPDATE: {res}, {data!r}")
 
     def monitor(self, res):
@@ -58,10 +53,12 @@ class App:
                 self.monitor(self.client.hello_world(name=random.choice(names)))
             elif i % 3 == 0:
                 self.monitor(self.client.progress(label=f'proc{i}'))
+            elif i % 5 == 0:
+                self.monitor(self.client.error())
             else:
                 self.monitor(self.client.date())
             i += 1
-            time.sleep(0.5)
+            time.sleep(random.randint(1, 5))
 
             # Remove completed results
             self.results = [res for res in self.results if not res.is_ready()]
@@ -74,15 +71,15 @@ class App:
             time.sleep(0.1)
 
         logger.info(f"Client done in {time.time() - start_time:.2f} seconds")
-        Gtk.main_quit()
+        self.quit()
 
     def start(self):
         Thread(target=self.run, daemon=True).start()
+        self.exec()
 
 
 if __name__ == '__main__':
     log.log_to_console()
     app = App()
     app.start()
-    Gtk.main()
 

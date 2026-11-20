@@ -1,19 +1,20 @@
 from __future__ import annotations
 
 import functools
-import re
 import os
-import sys
-import time
 import queue
 import socket
+import time
+import uuid
 from collections import defaultdict, deque
-
-from typing import Any, Callable, Protocol, Type, Literal, Sequence
-from threading import Event, Lock, Thread, current_thread
+from dataclasses import dataclass, field
 from multiprocessing import Process
+from pathlib import Path
+from threading import Event, Lock, Thread, current_thread
+from typing import Any, Callable, Protocol, Type, Literal, Sequence
 
 import zmq
+
 from . import log, namer, __version__
 from .protocol import Request, Response, ResponseType
 from .transport import (
@@ -29,12 +30,124 @@ try:
 except ImportError:
     DASH_ENABLED = False
 
+try:
+    import psutil
+except ImportError:
+    psutil = None
+
 
 logger = log.get_module_logger(__name__)
 
 SERVER_TIMEOUT = 4
 MIN_HEARTBEAT_INTERVAL = 1
 MAX_HEARTBEAT_INTERVAL = 2
+
+
+def _parse_heartbeat_content(content: Any) -> tuple[set[str], dict[str, Any] | None, str | None]:
+    """Extract advertised methods, optional telemetry metrics, and optional session ID from HEARTBEAT content."""
+    if isinstance(content, dict):
+        methods = content.get('methods', ())
+        metrics = content.get('metrics')
+        session = content.get('session')
+        return (
+            set(methods),
+            metrics if isinstance(metrics, dict) else None,
+            session if isinstance(session, str) else None,
+        )
+    try:
+        return set(content), None, None
+    except (ValueError, TypeError):
+        return set(), None, None
+
+
+class WorkerMetricsSampler:
+    """Collects per-worker CPU, memory, network I/O, and resource availability metrics.
+
+    Subclasses may override ``sample(active_tasks)``—calling ``super().sample(active_tasks)``
+    and merging additional KPI keys into the returned dictionary.
+    """
+
+    def __init__(self, max_tasks: int | None = None, disk_path: str | None = None):
+        self.max_tasks = max_tasks
+        self.disk_path = disk_path
+        self._proc = psutil.Process() if psutil is not None else None
+        self._last_ts = time.time()
+        self._last_net = psutil.net_io_counters() if psutil is not None else None
+        if self._proc is not None:
+            try:
+                self._proc.cpu_percent(interval=None)
+            except Exception:
+                self._proc = None
+        if psutil is not None:
+            try:
+                psutil.cpu_percent(interval=None)
+            except Exception:
+                pass
+
+    def sample(self, active_tasks: int) -> dict[str, Any]:
+        """Return a dict of current worker telemetry and resource availability metrics."""
+        cpu_count = (psutil.cpu_count(logical=True) if psutil is not None else os.cpu_count()) or 1
+        try:
+            load_1m = round(float(os.getloadavg()[0]), 2)
+        except (AttributeError, OSError):
+            load_1m = 0.0
+
+        metrics: dict[str, Any] = {
+            'cpu_pct': 0.0,
+            'mem_rss': 0,
+            'net_rx_bps': 0.0,
+            'net_tx_bps': 0.0,
+            'active_tasks': active_tasks,
+            'mem_avail': 0,
+            'mem_avail_pct': 0.0,
+            'cpu_avail_pct': 0.0,
+            'load_1m': load_1m,
+            'cpu_count': int(cpu_count),
+        }
+        if self.max_tasks is not None:
+            metrics['max_tasks'] = int(self.max_tasks)
+            metrics['slots_free'] = max(0, int(self.max_tasks) - active_tasks)
+
+        if psutil is None:
+            return metrics
+
+        if self._proc is not None:
+            now = time.time()
+            dt = max(now - self._last_ts, 1e-3)
+            try:
+                metrics['cpu_pct'] = round(self._proc.cpu_percent(interval=None), 2)
+                metrics['mem_rss'] = int(self._proc.memory_info().rss)
+                net_io = psutil.net_io_counters()
+                if net_io is not None and self._last_net is not None:
+                    metrics['net_rx_bps'] = round(max(0, net_io.bytes_recv - self._last_net.bytes_recv) / dt, 1)
+                    metrics['net_tx_bps'] = round(max(0, net_io.bytes_sent - self._last_net.bytes_sent) / dt, 1)
+                self._last_net = net_io
+                self._last_ts = now
+            except Exception:
+                pass
+
+        try:
+            vm = psutil.virtual_memory()
+            metrics['mem_avail'] = int(vm.available)
+            metrics['mem_avail_pct'] = round(max(0.0, 100.0 - float(vm.percent)), 2)
+        except Exception:
+            pass
+
+        try:
+            metrics['cpu_avail_pct'] = round(max(0.0, 100.0 - float(psutil.cpu_percent(interval=None))), 2)
+        except Exception:
+            pass
+
+        if self.disk_path is not None:
+            try:
+                metrics['disk_free'] = int(psutil.disk_usage(self.disk_path).free)
+            except Exception:
+                pass
+
+        return metrics
+
+
+_WorkerMetricsSampler = WorkerMetricsSampler
 
 
 def control(fn: Callable) -> Callable:
@@ -196,6 +309,7 @@ def _resolve_service(target) -> tuple[Type[Service], Callable[[], Service]]:
 class Worker(object):
     """
     A worker which manages an instance of the Service. Each worker is able to perform the same tasks
+    or a restricted set specified through the "methods" parameter
     """
 
     def __init__(
@@ -206,6 +320,8 @@ class Worker(object):
         *args,
         transport: WorkerTransport | None = None,
         pub_addr: str | None = None,
+        worker_id: str | bytes | None = None,
+        metrics_sampler: WorkerMetricsSampler | None = None,
         **kwargs,
     ):
         """
@@ -214,6 +330,8 @@ class Worker(object):
         :param methods: List of remote methods supported by this worker instance
         :param transport: Optional WorkerTransport adapter; defaults to ZmqWorkerTransport
         :param pub_addr: Optional ZMQ PUB address (broker XSUB) for broadcast events
+        :param worker_id: Optional explicit worker identity; defaults to a persistent per-host/service lease
+        :param metrics_sampler: Optional WorkerMetricsSampler instance; defaults to create_metrics_sampler()
         """
 
         self.service = service
@@ -222,7 +340,15 @@ class Worker(object):
         self.replies = queue.Queue()
         self.methods = methods
         self.transport = transport
+        self.worker_id: bytes | None = (
+            worker_id.encode('utf-8') if isinstance(worker_id, str) else worker_id
+        )
+        self._metrics_sampler = metrics_sampler
         self._stop_event = Event()
+
+    def create_metrics_sampler(self) -> WorkerMetricsSampler:
+        """Return the WorkerMetricsSampler for this worker; subclasses may override."""
+        return WorkerMetricsSampler()
 
     def is_supported(self, method: str) -> bool:
         """
@@ -255,35 +381,63 @@ class Worker(object):
         """
         Main loop of the worker
         """
-        transport = self.transport or ZmqWorkerTransport(
-            self.backend,
-            self.service.create_worker_id(),
-            pub_addr=self.pub_addr,
-        )
-        if hasattr(transport, 'publish'):
-            self.service._publisher = transport.publish
-        active_requests: dict[str, Request] = {}
-        active_lock = Lock()
-
-        def _dispatch(req: Request) -> None:
-            try:
-                self.service.call_remote(req)
-            finally:
-                with active_lock:
-                    active_requests.pop(req.identity, None)
-
+        lease: namer.WorkerIdentityLease | None = None
+        transport: WorkerTransport | None = None
+        started = False
         try:
+            if self.transport is not None:
+                transport = self.transport
+                self.worker_id = getattr(transport, 'worker_id', self.worker_id)
+            else:
+                if self.worker_id is not None:
+                    wid = self.worker_id
+                elif type(self.service).create_worker_id is not Service.create_worker_id:
+                    wid = self.service.create_worker_id()
+                else:
+                    lease = namer.WorkerIdentityLease.acquire(
+                        service_name=type(self.service).__name__,
+                        backend=self.backend,
+                        methods=self.methods,
+                    )
+                    wid = lease.worker_id
+                self.worker_id = wid
+                transport = ZmqWorkerTransport(
+                    self.backend,
+                    wid,
+                    pub_addr=self.pub_addr,
+                )
+
+            if hasattr(transport, 'publish'):
+                self.service._publisher = transport.publish
+            active_requests: dict[str, Request] = {}
+            active_lock = Lock()
+            session_id = uuid.uuid4().hex
+
+            def _dispatch(req: Request) -> None:
+                try:
+                    self.service.call_remote(req)
+                finally:
+                    with active_lock:
+                        active_requests.pop(req.identity, None)
+
             self.service.on_start()
+            started = True
+            sampler = (
+                self._metrics_sampler
+                if self._metrics_sampler is not None
+                else self.create_metrics_sampler()
+            )
             # initial heartbeat message
-            transport.send(Response.heartbeat_message(methods=self.methods))
-            last_message = time.time()
+            transport.send(
+                Response.heartbeat_message(methods=self.methods, metrics=sampler.sample(0), session=session_id)
+            )
+            last_heartbeat = time.time()
 
             while not self._stop_event.is_set():
                 while not self.replies.empty():
                     response = self.replies.get()
                     logger.debug(f'-> {response}')
                     transport.send(response)
-                    last_message = time.time()
 
                 request = transport.recv(10)
                 if request is not None:
@@ -304,16 +458,28 @@ class Worker(object):
                     task = Thread(target=_dispatch, args=(request,), daemon=True)
                     task.start()
 
-                # Send a heartbeat every so often when idle
-                if time.time() - last_message > MIN_HEARTBEAT_INTERVAL:
-                    transport.send(Response.heartbeat_message(methods=self.methods))
-                    last_message = time.time()
+                # Send periodic heartbeat + telemetry even when busy
+                if time.time() - last_heartbeat >= MIN_HEARTBEAT_INTERVAL:
+                    with active_lock:
+                        n_active = len(active_requests)
+                    transport.send(
+                        Response.heartbeat_message(
+                            methods=self.methods,
+                            metrics=sampler.sample(n_active),
+                            session=session_id,
+                        )
+                    )
+                    last_heartbeat = time.time()
         finally:
-            try:
-                self.service.on_shutdown()
-            except Exception as exc:
-                logger.exception(exc)
-            transport.close()
+            if started:
+                try:
+                    self.service.on_shutdown()
+                except Exception as exc:
+                    logger.exception(exc)
+            if transport is not None:
+                transport.close()
+            if lease is not None:
+                lease.release()
 
 
 def start_worker(address: str, factory, methods: Sequence[str] = (), pub_addr: str | None = None, *args, **kwargs):
@@ -334,26 +500,83 @@ def start_worker(address: str, factory, methods: Sequence[str] = (), pub_addr: s
 class MonitorPort(Protocol):
     """Port for recording broker RPC lifecycle events."""
 
-    def record_request(self, worker_id: str, client_id: str, request_id: str, method: str, kwargs: dict[str, Any]) -> None: ...
+    def record_request(
+        self,
+        worker_id: str,
+        client_id: str,
+        request_id: str,
+        method: str,
+        kwargs: dict[str, Any],
+        queue_wait: float | None = None,
+    ) -> None: ...
     def record_response(self, worker_id: str, request_id: str, status: str, result: Any) -> None: ...
-    def update_worker(self, worker_id: str) -> None: ...
+    def update_worker(
+        self,
+        worker_id: str,
+        metrics: dict[str, Any] | None = None,
+        methods: Sequence[str] | None = None,
+    ) -> None: ...
+    def update_broker(self, queue_depth: int = 0, oldest_wait_s: float = 0.0) -> None: ...
     def clear_workers(self, workers: Sequence[str]) -> None: ...
 
 
 class NullMonitor:
     """No-op MonitorPort adapter used when monitoring is disabled."""
 
-    def record_request(self, worker_id: str, client_id: str, request_id: str, method: str, kwargs: dict[str, Any]) -> None:
+    def record_request(
+        self,
+        worker_id: str,
+        client_id: str,
+        request_id: str,
+        method: str,
+        kwargs: dict[str, Any],
+        queue_wait: float | None = None,
+    ) -> None:
         pass
 
     def record_response(self, worker_id: str, request_id: str, status: str, result: Any) -> None:
         pass
 
-    def update_worker(self, worker_id: str) -> None:
+    def update_worker(
+        self,
+        worker_id: str,
+        metrics: dict[str, Any] | None = None,
+        methods: Sequence[str] | None = None,
+    ) -> None:
+        pass
+
+    def update_broker(self, queue_depth: int = 0, oldest_wait_s: float = 0.0) -> None:
         pass
 
     def clear_workers(self, workers: Sequence[str]) -> None:
         pass
+
+
+@dataclass
+class _BrokerState:
+    """Mutable routing and liveness state owned by a single Server._run_broker loop."""
+
+    strategy: Literal['round-robin', 'balancing']
+    control_methods: set[str]
+    max_pending: int | None = None
+    worker_times: dict[bytes, float] = field(default_factory=dict)
+    worker_methods: dict[bytes, set[str]] = field(default_factory=dict)
+    worker_sessions: dict[bytes, str] = field(default_factory=dict)
+    worker_queue: list[bytes] = field(default_factory=list)
+    pending_requests: deque[tuple[float, Request]] = field(default_factory=deque)
+    active_request_worker: dict[str, bytes] = field(default_factory=dict)
+    active_client_requests: dict[bytes, set[str]] = field(default_factory=lambda: defaultdict(set))
+    client_last_seen: dict[bytes, float] = field(default_factory=dict)
+
+    def can_accept_clients(self) -> bool:
+        return self.max_pending is None or len(self.pending_requests) < self.max_pending
+
+    def purge_worker_requests(self, worker: bytes) -> None:
+        orphaned = [rid for rid, w in self.active_request_worker.items() if w == worker]
+        for rid in orphaned:
+            self.active_request_worker.pop(rid, None)
+            for reqs in self.active_client_requests.values():
+                reqs.discard(rid)
 
 
 class Server(object):
@@ -362,25 +585,29 @@ class Server(object):
         service_factory,
         ports: tuple = (9990, 9991),
         instances: int = 1,
-        monitor_port: int = None,
+        monitor_port: int | None = None,
+        monitor_db: str | Path | None = None,
         transport: BrokerTransport | None = None,
         monitor: MonitorPort | None = None,
         threaded: bool = False,
         worker_transport_factory: Callable[[], WorkerTransport] | None = None,
         client_timeout: float | None = None,
         pub_port: int | None = None,
+        max_pending: int | None = None,
     ):
         """
         :param service_factory: A Service class, Service.factory(), or ServiceFactory
         :param ports: a tuple of ports for frontend, backend
         :param instances: Number of workers to start on server. Additional workers can be started on other hosts
         :param monitor_port: alternate way to specify a monitor port
+        :param monitor_db: Optional path to the SQLite monitor database (defaults to a per-service/port file)
         :param transport: Optional BrokerTransport adapter; defaults to ZmqBrokerTransport
         :param monitor: Optional MonitorPort adapter; defaults to NullMonitor unless monitor_port is set
         :param threaded: If True, run workers in-process in daemon threads instead of multiprocessing.Process
         :param worker_transport_factory: Optional factory for WorkerTransport when threaded=True
         :param client_timeout: Optional seconds of inactivity before cancelling a client's active requests
         :param pub_port: Optional port for XPUB broadcast events (binds XSUB on pub_port + 1)
+        :param max_pending: Optional maximum number of queued requests before applying frontend backpressure
         """
         self.service_type, _ = _resolve_service(service_factory)
         self.service_factory = service_factory
@@ -392,6 +619,7 @@ class Server(object):
         self._stop_event = Event()
         self._broker_thread: Thread | None = None
         self.client_timeout = client_timeout
+        self.max_pending = max_pending
         self.manager = WorkerManager(
             self.service_factory,
             self.backend_addr,
@@ -410,10 +638,17 @@ class Server(object):
                 'version': f"v{__version__}",
                 'frontend': self.frontend_addr,
                 'backend': self.backend_addr,
+                'publish': self.pub_addr,
+                'subscribe': self.xsub_addr,
                 'description': self.service_type.get_description(),
                 'methods': self.service_type.get_methods()
             }
-            self.monitor = mon.Monitor(service_info=info)
+            db_path = (
+                monitor_db
+                if monitor_db is not None
+                else mon.default_db_path(service_name=self.service_type.__name__, port=ports[0])
+            )
+            self.monitor = mon.Monitor(service_info=info, db_path=db_path)
             mon.start_monitor_thread(self.monitor, port=monitor_port)
         elif monitor_port:
             logger.warning('Dashboard not enabled. Please run "pip install szrpc[dash] to enable it"')
@@ -442,6 +677,8 @@ class Server(object):
             and self._broker_thread.is_alive()
         ):
             self._broker_thread.join(timeout=1.0)
+        if hasattr(self.monitor, 'close'):
+            self.monitor.close()
 
     def close(self) -> None:
         """Alias for stop()."""
@@ -489,19 +726,13 @@ class Server(object):
         self.manager.start_workers()
         return ctx, frontend, backend
 
-    def _process_response(self, worker: bytes, response: Response, transport: BrokerTransport):
-        if response.type not in (ResponseType.HEARTBEAT, ResponseType.READY):
-            transport.send_to_client(response)
-            self.monitor.record_response(
-                worker.decode('utf-8'),
-                response.identity,
-                response.type.name,
-                response.content,
-            )
-        else:
-            self.monitor.update_worker(worker.decode('utf-8'))
+    def _advertised_methods(self, raw_methods: set[str]) -> list[str]:
+        if raw_methods:
+            return sorted(raw_methods)
+        builtin = {'ping', 'client_config'} | self.service_type.get_control_methods()
+        return sorted(m for m in self.service_type.get_methods() if m not in builtin)
 
-    def _monitor_request(self, worker: bytes, request: Request):
+    def _monitor_request(self, worker: bytes, request: Request, queue_wait: float | None = None):
         try:
             self.monitor.record_request(
                 worker.decode('utf-8'),
@@ -509,6 +740,7 @@ class Server(object):
                 request.identity,
                 request.method,
                 request.kwargs,
+                queue_wait=queue_wait,
             )
         except Exception as e:
             logger.error(f"Failed to record request in monitor: {e}")
@@ -533,8 +765,8 @@ class Server(object):
             backend.close(linger=0)
             ctx.term()
 
+    @staticmethod
     def _select_worker(
-        self,
         method: str,
         worker_queue: list[bytes],
         worker_methods: dict[bytes, set[str]],
@@ -546,133 +778,209 @@ class Server(object):
             w_methods = worker_methods.get(worker, set())
             if not w_methods or method in w_methods:
                 return worker_queue.pop(i)
-        logger.warning(f'No available workers support method `{method}`!')
         return worker_queue.pop(0)
 
-    def _run_broker(self, strategy: Literal['round-robin', 'balancing']) -> None:
-        """Unified broker loop supporting 'round-robin' and 'balancing' routing strategies."""
-        transport = self.transport or ZmqBrokerTransport(
+    def _open_broker_transport(self) -> BrokerTransport:
+        if self.transport is not None:
+            return self.transport
+        transport = ZmqBrokerTransport(
             self.frontend_addr,
             self.backend_addr,
             pub_addr=self.pub_addr,
             xsub_addr=self.xsub_addr,
         )
-        if self.transport is None:
-            logger.info(f'Listening for tasks from: {self.frontend_addr}')
-            logger.info(f'Listening for workers at: {self.backend_addr}')
+        logger.info(f'Listening for tasks from: {self.frontend_addr}')
+        logger.info(f'Listening for workers at: {self.backend_addr}')
+        return transport
+
+    def _handle_heartbeat(
+        self,
+        state: _BrokerState,
+        worker: bytes,
+        response: Response,
+        worker_is_new: bool,
+    ) -> None:
+        w_methods, metrics, w_session = _parse_heartbeat_content(response.content)
+        prev_session = state.worker_sessions.get(worker)
+        if (
+            not worker_is_new
+            and w_session is not None
+            and prev_session is not None
+            and w_session != prev_session
+        ):
+            state.purge_worker_requests(worker)
+            self._monitor_cleanup([worker])
+            if worker not in state.worker_queue:
+                state.worker_queue.append(worker)
+            logger.info(f'Worker restarted: {worker.decode("utf-8")}')
+        if w_session is not None:
+            state.worker_sessions[worker] = w_session
+        state.worker_methods[worker] = w_methods
+        self.monitor.update_worker(
+            worker.decode('utf-8'),
+            metrics=metrics,
+            methods=self._advertised_methods(w_methods),
+        )
+
+    def _handle_backend_reply(
+        self,
+        state: _BrokerState,
+        transport: BrokerTransport,
+        worker: bytes,
+        response: Response,
+        now: float,
+    ) -> None:
+        worker_is_new = worker not in state.worker_times
+        state.worker_times[worker] = now
+
+        if response.type == ResponseType.HEARTBEAT:
+            self._handle_heartbeat(state, worker, response, worker_is_new)
+        elif response.type == ResponseType.READY:
+            self.monitor.update_worker(worker.decode('utf-8'))
+        else:
+            transport.send_to_client(response)
+            self.monitor.record_response(
+                worker.decode('utf-8'),
+                response.identity,
+                response.type.name,
+                response.content,
+            )
+
+        if response.type in (ResponseType.DONE, ResponseType.ERROR):
+            state.active_request_worker.pop(response.identity, None)
+            state.active_client_requests.get(response.client_id, set()).discard(response.identity)
+
+        if (
+            state.strategy == 'balancing'
+            and response.type in (ResponseType.DONE, ResponseType.ERROR, ResponseType.READY)
+            and worker not in state.worker_queue
+        ):
+            state.worker_queue.append(worker)
+
+        if worker_is_new:
+            if worker not in state.worker_queue:
+                state.worker_queue.append(worker)
+            suffix = ','.join(state.worker_methods.get(worker, set())) or 'All'
+            logger.info(f'Workers [{len(state.worker_times):4d}], + : {worker.decode("utf-8")} | {suffix}')
+
+    def _expire_workers(self, state: _BrokerState, now: float) -> None:
+        expired = now - MAX_HEARTBEAT_INTERVAL
+        removed = [w for w, t in state.worker_times.items() if t <= expired]
+        if not removed:
+            return
+        removed_set = set(removed)
+        state.worker_times = {w: t for w, t in state.worker_times.items() if w not in removed_set}
+        state.worker_queue = [w for w in state.worker_queue if w not in removed_set]
+        state.worker_methods = {w: m for w, m in state.worker_methods.items() if w not in removed_set}
+        state.worker_sessions = {w: s for w, s in state.worker_sessions.items() if w not in removed_set}
+        for worker in removed:
+            state.purge_worker_requests(worker)
+        removed_workers = ', '.join(w.decode('utf-8') for w in removed)
+        logger.warning(f'Workers [{len(state.worker_times):4d}], - : {removed_workers}')
+        self._monitor_cleanup(removed)
+
+    def _expire_clients(self, state: _BrokerState, transport: BrokerTransport, now: float) -> None:
+        if self.client_timeout is None:
+            return
+        stale_clients = [c for c, t in state.client_last_seen.items() if now - t > self.client_timeout]
+        for cid in stale_clients:
+            state.client_last_seen.pop(cid, None)
+            for req_id in state.active_client_requests.pop(cid, set()):
+                target_worker = state.active_request_worker.pop(req_id, None)
+                if target_worker in state.worker_times:
+                    cancel_req = Request(cid, b'disconnect-cancel', '__cancel__', {'request_id': req_id})
+                    transport.send_to_worker(target_worker, cancel_req)
+
+    def _pick_worker(self, state: _BrokerState, method: str) -> bytes | None:
+        if method in state.control_methods and not state.worker_queue:
+            return self._select_worker(method, list(state.worker_times.keys()), state.worker_methods)
+        worker = self._select_worker(method, state.worker_queue, state.worker_methods)
+        if worker is not None and state.strategy == 'round-robin':
+            state.worker_queue.append(worker)
+        return worker
+
+    def _dispatch_request(
+        self,
+        state: _BrokerState,
+        transport: BrokerTransport,
+        request: Request,
+        queue_wait: float | None = None,
+    ) -> bool:
+        """Route a single request. Returns False if the request should be deferred."""
+        if request.method == '__cancel__':
+            target_id = request.kwargs.get('request_id', '')
+            target_worker = state.active_request_worker.get(target_id)
+            if target_worker in state.worker_times:
+                transport.send_to_worker(target_worker, request)
+            return True
+
+        if request.method in ('client_config', 'ping'):
+            content = '' if request.method == 'ping' else self.service_type.get_methods()
+            transport.send_to_client(request.reply(content, ResponseType.DONE))
+            return True
+
+        if not state.worker_times:
+            transport.send_to_client(
+                request.reply(
+                    {'type': 'RuntimeError', 'message': 'No workers available', 'code': 'NO_WORKERS'},
+                    ResponseType.ERROR,
+                )
+            )
+            return True
+
+        worker = self._pick_worker(state, request.method)
+        if worker is None:
+            return False
+
+        state.active_request_worker[request.identity] = worker
+        state.active_client_requests[request.client_id].add(request.identity)
+        transport.send_to_worker(worker, request)
+        self._monitor_request(worker, request, queue_wait=queue_wait)
+        return True
+
+    def _dispatch_requests(
+        self,
+        state: _BrokerState,
+        transport: BrokerTransport,
+        frontend_requests: Sequence[Request],
+        now: float,
+    ) -> None:
+        mono_now = time.monotonic()
+        for req in frontend_requests:
+            state.client_last_seen[req.client_id] = now
+            state.pending_requests.append((mono_now, req))
+
+        deferred: deque[tuple[float, Request]] = deque()
+        while state.pending_requests:
+            arrival_ts, request = state.pending_requests.popleft()
+            queue_wait = max(0.0, mono_now - arrival_ts)
+            if not self._dispatch_request(state, transport, request, queue_wait=queue_wait):
+                deferred.append((arrival_ts, request))
+        state.pending_requests = deferred
+        oldest_wait_s = max(0.0, mono_now - state.pending_requests[0][0]) if state.pending_requests else 0.0
+        if hasattr(self.monitor, 'update_broker'):
+            self.monitor.update_broker(queue_depth=len(state.pending_requests), oldest_wait_s=oldest_wait_s)
+
+    def _run_broker(self, strategy: Literal['round-robin', 'balancing']) -> None:
+        """Unified broker loop supporting 'round-robin' and 'balancing' routing strategies."""
+        transport = self._open_broker_transport()
         self.manager.start_workers()
-
-        worker_times: dict[bytes, float] = {}
-        worker_methods: dict[bytes, set[str]] = {}
-        worker_queue: list[bytes] = []
-        control_methods = self.service_type.get_control_methods()
-        pending_requests: deque[Request] = deque()
-        active_request_worker: dict[str, bytes] = {}
-        active_client_requests: dict[bytes, set[str]] = defaultdict(set)
-        client_last_seen: dict[bytes, float] = {}
-
+        state = _BrokerState(
+            strategy=strategy,
+            control_methods=self.service_type.get_control_methods(),
+            max_pending=self.max_pending,
+        )
         try:
             while not self._stop_event.is_set():
-                accept_clients = bool(worker_queue) or (bool(control_methods) and bool(worker_times))
                 backend_replies, frontend_requests = transport.poll(
-                    10, accept_clients=accept_clients
+                    10, accept_clients=state.can_accept_clients()
                 )
-
-                for worker, response in backend_replies:
-                    worker_is_new = worker not in worker_times
-                    worker_times[worker] = time.time()
-                    self._process_response(worker, response, transport)
-
-                    if response.type in (ResponseType.DONE, ResponseType.ERROR):
-                        active_request_worker.pop(response.identity, None)
-                        active_client_requests.get(response.client_id, set()).discard(response.identity)
-
-                    if response.type == ResponseType.HEARTBEAT:
-                        try:
-                            w_methods = set(response.content)
-                        except (ValueError, TypeError):
-                            w_methods = set()
-                        worker_methods[worker] = w_methods
-                    elif (
-                        strategy == 'balancing'
-                        and response.type in (ResponseType.DONE, ResponseType.ERROR, ResponseType.READY)
-                        and worker not in worker_queue
-                    ):
-                        worker_queue.append(worker)
-
-                    if worker_is_new:
-                        worker_queue.append(worker)
-                        suffix = ','.join(worker_methods.get(worker, set())) or 'All'
-                        logger.info(f'Workers [{len(worker_times):4d}], + : {worker.decode("utf-8")} | {suffix}')
-
                 now = time.time()
-                expired = now - MAX_HEARTBEAT_INTERVAL
-                removed = [w for w, t in worker_times.items() if t <= expired]
-                if removed:
-                    removed_set = set(removed)
-                    worker_times = {w: t for w, t in worker_times.items() if w not in removed_set}
-                    worker_queue = [w for w in worker_queue if w not in removed_set]
-                    worker_methods = {w: m for w, m in worker_methods.items() if w not in removed_set}
-                    removed_workers = ', '.join(w.decode('utf-8') for w in removed)
-                    logger.warning(f'Workers [{len(worker_times):4d}], - : {removed_workers}')
-                    self._monitor_cleanup(removed)
-
-                if self.client_timeout is not None:
-                    stale_clients = [c for c, t in client_last_seen.items() if now - t > self.client_timeout]
-                    for cid in stale_clients:
-                        client_last_seen.pop(cid, None)
-                        for req_id in active_client_requests.pop(cid, set()):
-                            target_worker = active_request_worker.pop(req_id, None)
-                            if target_worker in worker_times:
-                                cancel_req = Request(cid, b'disconnect-cancel', '__cancel__', {'request_id': req_id})
-                                transport.send_to_worker(target_worker, cancel_req)
-
-                for req in frontend_requests:
-                    client_last_seen[req.client_id] = now
-
-                pending_requests.extend(frontend_requests)
-                deferred: deque[Request] = deque()
-
-                while pending_requests:
-                    request = pending_requests.popleft()
-                    if request.method == '__cancel__':
-                        target_id = request.kwargs.get('request_id', '')
-                        target_worker = active_request_worker.get(target_id)
-                        if target_worker in worker_times:
-                            transport.send_to_worker(target_worker, request)
-                        continue
-
-                    if request.method in ('client_config', 'ping'):
-                        content = '' if request.method == 'ping' else self.service_type.get_methods()
-                        transport.send_to_client(request.reply(content, ResponseType.DONE))
-                        continue
-
-                    if not worker_times:
-                        transport.send_to_client(
-                            request.reply(
-                                {'type': 'RuntimeError', 'message': 'No workers available', 'code': 'NO_WORKERS'},
-                                ResponseType.ERROR,
-                            )
-                        )
-                        continue
-
-                    if request.method in control_methods and not worker_queue:
-                        live_pool = list(worker_times.keys())
-                        worker = self._select_worker(request.method, live_pool, worker_methods)
-                    else:
-                        worker = self._select_worker(request.method, worker_queue, worker_methods)
-                        if worker is None:
-                            deferred.append(request)
-                            continue
-                        if strategy == 'round-robin':
-                            worker_queue.append(worker)
-
-                    active_request_worker[request.identity] = worker
-                    active_client_requests[request.client_id].add(request.identity)
-                    transport.send_to_worker(worker, request)
-                    self._monitor_request(worker, request)
-
-                pending_requests = deferred
+                for worker, response in backend_replies:
+                    self._handle_backend_reply(state, transport, worker, response, now)
+                self._expire_workers(state, now)
+                self._expire_clients(state, transport, now)
+                self._dispatch_requests(state, transport, frontend_requests, now)
         finally:
             transport.close()
 

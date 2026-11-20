@@ -1,7 +1,25 @@
-import itertools
+from __future__ import annotations
+
+import errno
+import hashlib
+import os
 import random
-import copy
-from typing import Generator
+import re
+import socket
+import tempfile
+import threading
+from pathlib import Path
+from typing import Generator, Sequence
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows fallback
+    fcntl = None
+
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - POSIX
+    msvcrt = None
 
 # Adjectives (mostly 1-3 syllables)
 ADJECTIVES = [
@@ -155,18 +173,18 @@ class RandomGenerator:
     """
     A name generator, guaranteed to be unique when generating less than 65,536 names
     """
-    def __init__(self, separator: str = '-', seed: int = None):
-        random.seed(seed)
+    def __init__(self, separator: str = '-', seed: int | bytes | str | None = None):
+        self._rng = random.Random(seed)
         self.separator = separator
         self.names = NAMES[:]
         self.adjectives = ADJECTIVES[:]
         self.total_names = len(self.names) * len(self.adjectives)
-        random.shuffle(self.names)
-        random.shuffle(self.adjectives)
-        self.name_generator = self.fisher_yates(self.total_names)
+        self._rng.shuffle(self.names)
+        self._rng.shuffle(self.adjectives)
+        self.name_generator = self.fisher_yates(self.total_names, rng=self._rng)
 
     @staticmethod
-    def fisher_yates(size: int) -> Generator[int, None, None]:
+    def fisher_yates(size: int, rng: random.Random | None = None) -> Generator[int, None, None]:
         """
         A generator that yields unique random integers from 0 to size-1.
         
@@ -175,10 +193,11 @@ class RandomGenerator:
         """
         # Track swapped elements: index -> value
         # If an index is missing, its value is the index itself.
+        rand = rng if rng is not None else random
         swaps = {}
         
         for i in reversed(range(size)):
-            j = random.randrange(i + 1)
+            j = rand.randrange(i + 1)
             yield swaps.get(j, j)       # Yield the value at index j
             
             # Move the value from index i to index j and remove it from swaps
@@ -194,7 +213,7 @@ class RandomGenerator:
         try:
             index = next(self.name_generator)
         except StopIteration:
-            self.name_generator = self.fisher_yates(self.total_names)
+            self.name_generator = self.fisher_yates(self.total_names, rng=self._rng)
             index = next(self.name_generator)
 
         adj_index, name_index = divmod(index, len(self.names))
@@ -216,3 +235,173 @@ class RandomGenerator:
             unique_names.add(self.generate_name())
 
         return list(unique_names)
+
+
+_INPROC_LOCK = threading.Lock()
+_INPROC_ACTIVE: set[Path] = set()
+
+
+def default_host_name() -> str:
+    """Return the uppercase short hostname used in worker identities."""
+    return socket.getfqdn().split('.')[0].upper()
+
+
+def _normalize_backend(backend: str) -> str:
+    normalized = backend.strip().lower()
+    normalized = normalized.replace('://*:', '://localhost:')
+    normalized = normalized.replace('://127.0.0.1:', '://localhost:')
+    normalized = normalized.replace('://[::1]:', '://localhost:')
+    return normalized
+
+
+def default_lock_dir() -> Path:
+    """Return the ephemeral directory for live worker identity lock files."""
+    runtime_dir = os.environ.get('XDG_RUNTIME_DIR')
+    if runtime_dir:
+        return Path(runtime_dir) / 'szrpc' / 'locks'
+    uid = os.getuid() if hasattr(os, 'getuid') else 'user'
+    return Path(tempfile.gettempdir()) / f'szrpc-{uid}' / 'locks'
+
+
+def _try_lock_fd(fd: int) -> bool:
+    if fcntl is not None:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except OSError as exc:
+            if exc.errno in (errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK):
+                return False
+            raise
+    if msvcrt is not None:  # pragma: no cover - Windows
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            return True
+        except OSError:
+            return False
+    return True  # pragma: no cover
+
+
+def _unlock_fd(fd: int) -> None:
+    if fcntl is not None:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+    elif msvcrt is not None:  # pragma: no cover - Windows
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+
+
+class WorkerIdentityLease:
+    """Holds a deterministic, OS-locked worker identity for the lifetime of a Worker.
+
+    Names are generated deterministically from ``(host, service_name, backend, methods)``
+    using ``RandomGenerator``, while an in-process set + OS advisory file lock (``flock``)
+    ensures concurrent threads and processes targeting the same broker never collide.
+    Locks are released automatically by the OS kernel if a worker crashes.
+    """
+
+    def __init__(self, worker_id: bytes, fd: int, lock_path: Path):
+        self.worker_id = worker_id
+        self._fd: int | None = fd
+        self._lock_path = lock_path
+        self._released = False
+
+    @property
+    def name(self) -> str:
+        return self.worker_id.decode('utf-8')
+
+    @classmethod
+    def acquire(
+        cls,
+        service_name: str,
+        backend: str,
+        methods: Sequence[str] = (),
+        *,
+        host: str | None = None,
+        lock_dir: str | Path | None = None,
+    ) -> 'WorkerIdentityLease':
+        resolved_host = (host or default_host_name()).upper()
+        norm_backend = _normalize_backend(backend)
+        sorted_methods = tuple(sorted(set(methods)))
+
+        broker_scope = f"{service_name}\x00{norm_backend}"
+        broker_dir_name = hashlib.sha256(broker_scope.encode('utf-8')).hexdigest()[:16]
+
+        seed_key = f"{resolved_host}\x00{service_name}\x00{norm_backend}\x00{','.join(sorted_methods)}"
+        seed = int.from_bytes(hashlib.sha256(seed_key.encode('utf-8')).digest(), 'big')
+        gen = RandomGenerator(seed=seed)
+
+        root = Path(lock_dir) if lock_dir is not None else default_lock_dir()
+        ns_dir = root / broker_dir_name
+        ns_dir.mkdir(parents=True, exist_ok=True)
+
+        for _ in range(gen.total_names):
+            candidate = f"{gen.generate_name()}@{resolved_host}"
+            safe_name = re.sub(r'[^a-zA-Z0-9._@-]+', '_', candidate)
+            lock_path = (ns_dir / f"{safe_name}.lock").resolve()
+
+            with _INPROC_LOCK:
+                if lock_path in _INPROC_ACTIVE:
+                    continue
+                _INPROC_ACTIVE.add(lock_path)
+
+            fd: int | None = None
+            try:
+                fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+                if not _try_lock_fd(fd):
+                    os.close(fd)
+                    fd = None
+                    with _INPROC_LOCK:
+                        _INPROC_ACTIVE.discard(lock_path)
+                    continue
+                try:
+                    os.ftruncate(fd, 0)
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    os.write(fd, f"{os.getpid()}\n".encode('ascii'))
+                except OSError:
+                    pass
+                return cls(candidate.encode('utf-8'), fd, lock_path)
+            except BaseException:
+                if fd is not None:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                with _INPROC_LOCK:
+                    _INPROC_ACTIVE.discard(lock_path)
+                raise
+
+        raise RuntimeError(f'Exhausted all {gen.total_names} worker identity slots for {service_name}')
+
+    def release(self) -> None:
+        with _INPROC_LOCK:
+            if self._released:
+                return
+            self._released = True
+            fd = self._fd
+            self._fd = None
+            _INPROC_ACTIVE.discard(self._lock_path)
+
+        if fd is not None:
+            _unlock_fd(fd)
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+    def __enter__(self) -> 'WorkerIdentityLease':
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.release()
+
+    def __del__(self) -> None:
+        try:
+            self.release()
+        except Exception:
+            pass

@@ -167,6 +167,7 @@ class ZmqBrokerTransport:
         self.context = zmq.Context()
         self.frontend = self.context.socket(zmq.ROUTER)
         self.backend = self.context.socket(zmq.ROUTER)
+        self.backend.setsockopt(zmq.ROUTER_HANDOVER, 1)
         self.frontend.bind(frontend_addr)
         self.backend.bind(backend_addr)
         self.poller = zmq.Poller()

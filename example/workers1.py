@@ -2,7 +2,7 @@
 from szrpc import log
 from szrpc.server import ServiceFactory, WorkerManager
 
-from test_server import MyService
+from server import MyService
 
 if __name__ == '__main__':
 
@@ -14,8 +14,10 @@ if __name__ == '__main__':
         address="tcp://localhost:9991",
         instances=4,
         methods=(
+            'hello_world',
+            'date',
             'progress',
-            'date'
+            'error',
         )
     )
     manager.run()
