@@ -48,6 +48,52 @@ const CHECK_ICON_SVG = `
 `;
 
 /**
+ * Compute status dot/badge metadata for live Broker queue depth and oldest wait age.
+ * @param {number} depth
+ * @param {number} oldestWaitS
+ * @returns {{ label: string, dotClass: string, badgeClass: string }}
+ */
+export function computeQueueDepthStatus(depth, oldestWaitS) {
+  const safeDepth = Math.max(0, toFiniteNumber(depth, 0));
+  const safeOldest = Math.max(0, toFiniteNumber(oldestWaitS, 0));
+  if (safeDepth <= 0) {
+    return {
+      label: 'Idle',
+      dotClass: 'status-dot bg-success',
+      badgeClass: 'badge bg-success-lt',
+    };
+  }
+  if (safeOldest >= 5) {
+    return {
+      label: 'High',
+      dotClass: 'status-dot status-dot-animated bg-danger',
+      badgeClass: 'badge bg-danger-lt',
+    };
+  }
+  return {
+    label: 'Queued',
+    dotClass: 'status-dot status-dot-animated bg-warning',
+    badgeClass: 'badge bg-warning-lt',
+  };
+}
+
+/**
+ * Compute status badge metadata for windowed p95 queue wait duration (seconds).
+ * @param {number} p95WaitS
+ * @returns {{ label: string, badgeClass: string }}
+ */
+export function computeQueueWaitStatus(p95WaitS) {
+  const safeWait = Math.max(0, toFiniteNumber(p95WaitS, 0));
+  if (safeWait < 0.05) {
+    return { label: 'Healthy', badgeClass: 'badge bg-success-lt' };
+  }
+  if (safeWait < 0.5) {
+    return { label: 'Elevated', badgeClass: 'badge bg-warning-lt' };
+  }
+  return { label: 'High', badgeClass: 'badge bg-danger-lt' };
+}
+
+/**
  * Compute clamped error-rate percentage in `[0, 100]`.
  * @param {number} total
  * @param {number} errors
@@ -223,6 +269,37 @@ function buildShellHtml(win) {
       </div>
     </div>
 
+    <div class="row row-deck row-cards mb-3">
+      <div class="col-sm-6">
+        <div class="card card-sm">
+          <div class="card-body">
+            <div class="subheader">Broker Queue Depth</div>
+            <div class="d-flex align-items-center justify-content-between gap-2 mt-1">
+              <div class="d-flex align-items-center gap-2">
+                <span class="status-dot bg-secondary" data-kpi-queue-depth-dot aria-hidden="true"></span>
+                <div class="h1 mb-0 font-mono" data-kpi-queue-depth>—</div>
+              </div>
+              <span class="badge d-none" data-kpi-queue-depth-badge></span>
+            </div>
+            <div class="text-secondary small mt-1 font-mono" data-kpi-queue-depth-sub>Waiting for Broker data…</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="col-sm-6">
+        <div class="card card-sm">
+          <div class="card-body">
+            <div class="subheader">Queue Wait (p95)</div>
+            <div class="d-flex align-items-center justify-content-between gap-2 mt-1">
+              <div class="h1 mb-0 font-mono" data-kpi-queue-wait>—</div>
+              <span class="badge d-none" data-kpi-queue-wait-badge></span>
+            </div>
+            <div class="text-secondary small mt-1 font-mono" data-kpi-queue-wait-sub>Loading ${escapeHtml(win)} window…</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="row row-cards">
       <div class="col-lg-6 d-flex flex-column gap-3">
         <div class="card">
@@ -291,9 +368,37 @@ function buildShellHtml(win) {
   `;
 }
 
+function patchQueueWaitKpi(summary, win) {
+  if (!els) return;
+  if (!summary) {
+    els.kpiQueueWait.textContent = '—';
+    els.kpiQueueWaitBadge.className = 'badge d-none';
+    els.kpiQueueWaitBadge.textContent = '';
+    els.kpiQueueWaitSub.textContent = `Loading ${win} window…`;
+    return;
+  }
+  const winCount = Math.max(0, toFiniteNumber(summary.total_requests, 0));
+  const winLabel = summary.window || win;
+  if (winCount === 0) {
+    els.kpiQueueWait.textContent = '—';
+    els.kpiQueueWaitBadge.className = 'badge d-none';
+    els.kpiQueueWaitBadge.textContent = '';
+    els.kpiQueueWaitSub.textContent = `No requests in ${winLabel}`;
+    return;
+  }
+  const p95Wait = Math.max(0, toFiniteNumber(summary.p95_queue_wait, 0));
+  const avgWait = Math.max(0, toFiniteNumber(summary.avg_queue_wait, 0));
+  const status = computeQueueWaitStatus(p95Wait);
+  els.kpiQueueWait.textContent = formatDuration(p95Wait);
+  els.kpiQueueWaitBadge.className = status.badgeClass;
+  els.kpiQueueWaitBadge.textContent = status.label;
+  els.kpiQueueWaitSub.textContent = `Avg: ${formatDuration(avgWait)} in ${winLabel}`;
+}
+
 function patchKpis(data, summary, win) {
   if (!els) return;
   els.windowLabel.textContent = win;
+  patchQueueWaitKpi(summary, win);
 
   const stats = data?.stats || null;
   if (!stats) {
@@ -309,6 +414,11 @@ function patchKpis(data, summary, win) {
     els.kpiErrorBar.setAttribute('aria-valuenow', '0');
     els.kpiWorkers.textContent = '—';
     els.kpiWorkersDot.className = 'status-dot bg-secondary';
+    els.kpiQueueDepth.textContent = '—';
+    els.kpiQueueDepthDot.className = 'status-dot bg-secondary';
+    els.kpiQueueDepthBadge.className = 'badge d-none';
+    els.kpiQueueDepthBadge.textContent = '';
+    els.kpiQueueDepthSub.textContent = 'Waiting for Broker data…';
     return;
   }
 
@@ -341,6 +451,17 @@ function patchKpis(data, summary, win) {
   els.kpiWorkersDot.className = activeWorkersCount > 0
     ? 'status-dot status-dot-animated bg-success'
     : 'status-dot bg-secondary';
+
+  const queueDepth = Math.max(0, Math.floor(toFiniteNumber(stats.queue_depth, 0)));
+  const oldestWait = Math.max(0, toFiniteNumber(stats.oldest_wait_s, 0));
+  const depthStatus = computeQueueDepthStatus(queueDepth, oldestWait);
+  els.kpiQueueDepth.textContent = queueDepth.toLocaleString();
+  els.kpiQueueDepthDot.className = depthStatus.dotClass;
+  els.kpiQueueDepthBadge.className = depthStatus.badgeClass;
+  els.kpiQueueDepthBadge.textContent = depthStatus.label;
+  els.kpiQueueDepthSub.textContent = queueDepth > 0
+    ? `Oldest waiting: ${formatDuration(oldestWait)}`
+    : 'No requests queued';
 }
 
 function patchBrokerEndpoints(data) {
@@ -704,6 +825,13 @@ export function mount(container, ctx) {
     kpiErrorBar: root.querySelector('[data-kpi-error-bar]'),
     kpiWorkers: root.querySelector('[data-kpi-workers]'),
     kpiWorkersDot: root.querySelector('[data-kpi-workers-dot]'),
+    kpiQueueDepth: root.querySelector('[data-kpi-queue-depth]'),
+    kpiQueueDepthDot: root.querySelector('[data-kpi-queue-depth-dot]'),
+    kpiQueueDepthBadge: root.querySelector('[data-kpi-queue-depth-badge]'),
+    kpiQueueDepthSub: root.querySelector('[data-kpi-queue-depth-sub]'),
+    kpiQueueWait: root.querySelector('[data-kpi-queue-wait]'),
+    kpiQueueWaitBadge: root.querySelector('[data-kpi-queue-wait-badge]'),
+    kpiQueueWaitSub: root.querySelector('[data-kpi-queue-wait-sub]'),
     endpointsBody: root.querySelector('[data-overview-endpoints]'),
     topMethodsWindow: root.querySelector('[data-top-methods-window]'),
     topMethodsBody: root.querySelector('[data-overview-top-methods]'),

@@ -33,6 +33,8 @@ import {
 import {
   computeElapsedSeconds,
   computeErrorRatePct,
+  computeQueueDepthStatus,
+  computeQueueWaitStatus,
   extractBrokerEndpoints,
   selectTopMethods,
 } from '../../szrpc/monitor/data/js/pages/overview.js';
@@ -508,6 +510,39 @@ describe('pages/overview.js', () => {
     assert.equal(computeElapsedSeconds(200, 150), 0);
     assert.equal(computeElapsedSeconds(null, 150), null);
     assert.equal(computeElapsedSeconds(0, 150), null);
+  });
+
+  it('computes broker queue depth status thresholds', () => {
+    assert.deepEqual(computeQueueDepthStatus(0, 0), {
+      label: 'Idle',
+      dotClass: 'status-dot bg-success',
+      badgeClass: 'badge bg-success-lt',
+    });
+    assert.deepEqual(computeQueueDepthStatus(3, 1.2), {
+      label: 'Queued',
+      dotClass: 'status-dot status-dot-animated bg-warning',
+      badgeClass: 'badge bg-warning-lt',
+    });
+    assert.deepEqual(computeQueueDepthStatus(2, 5.0), {
+      label: 'High',
+      dotClass: 'status-dot status-dot-animated bg-danger',
+      badgeClass: 'badge bg-danger-lt',
+    });
+  });
+
+  it('computes broker queue wait p95 status thresholds', () => {
+    assert.deepEqual(computeQueueWaitStatus(0.01), {
+      label: 'Healthy',
+      badgeClass: 'badge bg-success-lt',
+    });
+    assert.deepEqual(computeQueueWaitStatus(0.05), {
+      label: 'Elevated',
+      badgeClass: 'badge bg-warning-lt',
+    });
+    assert.deepEqual(computeQueueWaitStatus(0.5), {
+      label: 'High',
+      badgeClass: 'badge bg-danger-lt',
+    });
   });
 });
 
