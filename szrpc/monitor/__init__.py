@@ -38,7 +38,15 @@ def _wire_size(value: Any) -> int:
 class CallRecord:
     """In-memory representation of an active or recently completed RPC call."""
 
-    def __init__(self, request_id: str, client_id: str, method: str, kwargs: Dict[str, Any], worker_id: str):
+    def __init__(
+        self,
+        request_id: str,
+        client_id: str,
+        method: str,
+        kwargs: Dict[str, Any],
+        worker_id: str,
+        queue_wait: Optional[float] = None,
+    ):
         self.request_id = request_id
         self.client_id = client_id
         self.method = method
@@ -49,6 +57,7 @@ class CallRecord:
         self.date_time = datetime.now().astimezone()
         self.end_time: Optional[float] = None
         self.duration: Optional[float] = None
+        self.queue_wait: Optional[float] = queue_wait
         self.status = "ACTIVE"
         self.sent_bytes = 0
         self.num_updates = 0
@@ -65,6 +74,7 @@ class CallRecord:
             "start_time": self.start_time,
             "end_time": self.end_time,
             "duration": self.duration,
+            "queue_wait": self.queue_wait,
             "status": self.status,
             "sent_bytes": self.sent_bytes,
             "updates": self.num_updates,
@@ -84,6 +94,7 @@ class CallRecord:
             "start_time": self.start_time,
             "end_time": self.end_time,
             "duration": self.duration,
+            "queue_wait": self.queue_wait,
             "status": self.status,
             "sent_bytes": self.sent_bytes,
             "updates": self.num_updates,
@@ -110,23 +121,38 @@ class Monitor:
             "total_requests": 0,
             "total_errors": 0,
             "start_time": time.time(),
+            "queue_depth": 0,
+            "oldest_wait_s": 0.0,
         }
         self.workers: Dict[str, float] = {}
         self.worker_metrics: Dict[str, Dict[str, Any]] = {}
         self.worker_methods: Dict[str, list[str]] = {}
         self.store = SqliteMonitorStore(db_path=db_path)
 
-    def record_request(self, worker_id: str, client_id: str, request_id: str, method: str, kwargs: Dict[str, Any]):
+    def record_request(
+        self,
+        worker_id: str,
+        client_id: str,
+        request_id: str,
+        method: str,
+        kwargs: Dict[str, Any],
+        queue_wait: Optional[float] = None,
+    ):
         if method == 'ping':
             return
 
         with self.lock:
-            record = CallRecord(request_id, client_id, method, kwargs, worker_id)
+            record = CallRecord(request_id, client_id, method, kwargs, worker_id, queue_wait=queue_wait)
             self.active_calls[request_id] = record
             self.stats["total_requests"] += 1
             self.workers[worker_id] = time.time()
             row = record.to_store_row()
         self.store.enqueue_call(row)
+
+    def update_broker(self, queue_depth: int = 0, oldest_wait_s: float = 0.0) -> None:
+        with self.lock:
+            self.stats["queue_depth"] = int(queue_depth)
+            self.stats["oldest_wait_s"] = round(float(oldest_wait_s), 4)
 
     def record_response(self, worker_id: str, request_id: str, status: str, result: Any):
         row_to_store: Dict[str, Any] | None = None
@@ -255,6 +281,8 @@ class Monitor:
                     "total_errors": self.stats["total_errors"],
                     "uptime": now - self.stats["start_time"],
                     "active_workers_count": len(active_workers),
+                    "queue_depth": self.stats["queue_depth"],
+                    "oldest_wait_s": self.stats["oldest_wait_s"],
                 },
                 "workers": list(active_workers.keys()),
                 "worker_metrics": active_metrics,

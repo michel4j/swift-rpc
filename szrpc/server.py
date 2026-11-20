@@ -500,7 +500,15 @@ def start_worker(address: str, factory, methods: Sequence[str] = (), pub_addr: s
 class MonitorPort(Protocol):
     """Port for recording broker RPC lifecycle events."""
 
-    def record_request(self, worker_id: str, client_id: str, request_id: str, method: str, kwargs: dict[str, Any]) -> None: ...
+    def record_request(
+        self,
+        worker_id: str,
+        client_id: str,
+        request_id: str,
+        method: str,
+        kwargs: dict[str, Any],
+        queue_wait: float | None = None,
+    ) -> None: ...
     def record_response(self, worker_id: str, request_id: str, status: str, result: Any) -> None: ...
     def update_worker(
         self,
@@ -508,13 +516,22 @@ class MonitorPort(Protocol):
         metrics: dict[str, Any] | None = None,
         methods: Sequence[str] | None = None,
     ) -> None: ...
+    def update_broker(self, queue_depth: int = 0, oldest_wait_s: float = 0.0) -> None: ...
     def clear_workers(self, workers: Sequence[str]) -> None: ...
 
 
 class NullMonitor:
     """No-op MonitorPort adapter used when monitoring is disabled."""
 
-    def record_request(self, worker_id: str, client_id: str, request_id: str, method: str, kwargs: dict[str, Any]) -> None:
+    def record_request(
+        self,
+        worker_id: str,
+        client_id: str,
+        request_id: str,
+        method: str,
+        kwargs: dict[str, Any],
+        queue_wait: float | None = None,
+    ) -> None:
         pass
 
     def record_response(self, worker_id: str, request_id: str, status: str, result: Any) -> None:
@@ -528,6 +545,9 @@ class NullMonitor:
     ) -> None:
         pass
 
+    def update_broker(self, queue_depth: int = 0, oldest_wait_s: float = 0.0) -> None:
+        pass
+
     def clear_workers(self, workers: Sequence[str]) -> None:
         pass
 
@@ -538,17 +558,18 @@ class _BrokerState:
 
     strategy: Literal['round-robin', 'balancing']
     control_methods: set[str]
+    max_pending: int | None = None
     worker_times: dict[bytes, float] = field(default_factory=dict)
     worker_methods: dict[bytes, set[str]] = field(default_factory=dict)
     worker_sessions: dict[bytes, str] = field(default_factory=dict)
     worker_queue: list[bytes] = field(default_factory=list)
-    pending_requests: deque[Request] = field(default_factory=deque)
+    pending_requests: deque[tuple[float, Request]] = field(default_factory=deque)
     active_request_worker: dict[str, bytes] = field(default_factory=dict)
     active_client_requests: dict[bytes, set[str]] = field(default_factory=lambda: defaultdict(set))
     client_last_seen: dict[bytes, float] = field(default_factory=dict)
 
     def can_accept_clients(self) -> bool:
-        return bool(self.worker_queue) or (bool(self.control_methods) and bool(self.worker_times))
+        return self.max_pending is None or len(self.pending_requests) < self.max_pending
 
     def purge_worker_requests(self, worker: bytes) -> None:
         orphaned = [rid for rid, w in self.active_request_worker.items() if w == worker]
@@ -572,6 +593,7 @@ class Server(object):
         worker_transport_factory: Callable[[], WorkerTransport] | None = None,
         client_timeout: float | None = None,
         pub_port: int | None = None,
+        max_pending: int | None = None,
     ):
         """
         :param service_factory: A Service class, Service.factory(), or ServiceFactory
@@ -585,6 +607,7 @@ class Server(object):
         :param worker_transport_factory: Optional factory for WorkerTransport when threaded=True
         :param client_timeout: Optional seconds of inactivity before cancelling a client's active requests
         :param pub_port: Optional port for XPUB broadcast events (binds XSUB on pub_port + 1)
+        :param max_pending: Optional maximum number of queued requests before applying frontend backpressure
         """
         self.service_type, _ = _resolve_service(service_factory)
         self.service_factory = service_factory
@@ -596,6 +619,7 @@ class Server(object):
         self._stop_event = Event()
         self._broker_thread: Thread | None = None
         self.client_timeout = client_timeout
+        self.max_pending = max_pending
         self.manager = WorkerManager(
             self.service_factory,
             self.backend_addr,
@@ -708,7 +732,7 @@ class Server(object):
         builtin = {'ping', 'client_config'} | self.service_type.get_control_methods()
         return sorted(m for m in self.service_type.get_methods() if m not in builtin)
 
-    def _monitor_request(self, worker: bytes, request: Request):
+    def _monitor_request(self, worker: bytes, request: Request, queue_wait: float | None = None):
         try:
             self.monitor.record_request(
                 worker.decode('utf-8'),
@@ -716,6 +740,7 @@ class Server(object):
                 request.identity,
                 request.method,
                 request.kwargs,
+                queue_wait=queue_wait,
             )
         except Exception as e:
             logger.error(f"Failed to record request in monitor: {e}")
@@ -880,6 +905,7 @@ class Server(object):
         state: _BrokerState,
         transport: BrokerTransport,
         request: Request,
+        queue_wait: float | None = None,
     ) -> bool:
         """Route a single request. Returns False if the request should be deferred."""
         if request.method == '__cancel__':
@@ -910,7 +936,7 @@ class Server(object):
         state.active_request_worker[request.identity] = worker
         state.active_client_requests[request.client_id].add(request.identity)
         transport.send_to_worker(worker, request)
-        self._monitor_request(worker, request)
+        self._monitor_request(worker, request, queue_wait=queue_wait)
         return True
 
     def _dispatch_requests(
@@ -920,16 +946,21 @@ class Server(object):
         frontend_requests: Sequence[Request],
         now: float,
     ) -> None:
+        mono_now = time.monotonic()
         for req in frontend_requests:
             state.client_last_seen[req.client_id] = now
+            state.pending_requests.append((mono_now, req))
 
-        state.pending_requests.extend(frontend_requests)
-        deferred: deque[Request] = deque()
+        deferred: deque[tuple[float, Request]] = deque()
         while state.pending_requests:
-            request = state.pending_requests.popleft()
-            if not self._dispatch_request(state, transport, request):
-                deferred.append(request)
+            arrival_ts, request = state.pending_requests.popleft()
+            queue_wait = max(0.0, mono_now - arrival_ts)
+            if not self._dispatch_request(state, transport, request, queue_wait=queue_wait):
+                deferred.append((arrival_ts, request))
         state.pending_requests = deferred
+        oldest_wait_s = max(0.0, mono_now - state.pending_requests[0][0]) if state.pending_requests else 0.0
+        if hasattr(self.monitor, 'update_broker'):
+            self.monitor.update_broker(queue_depth=len(state.pending_requests), oldest_wait_s=oldest_wait_s)
 
     def _run_broker(self, strategy: Literal['round-robin', 'balancing']) -> None:
         """Unified broker loop supporting 'round-robin' and 'balancing' routing strategies."""
@@ -938,6 +969,7 @@ class Server(object):
         state = _BrokerState(
             strategy=strategy,
             control_methods=self.service_type.get_control_methods(),
+            max_pending=self.max_pending,
         )
         try:
             while not self._stop_event.is_set():

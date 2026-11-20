@@ -94,6 +94,7 @@ def _make_models(db: SqliteDatabase):
         start_time = FloatField(index=True)
         end_time = FloatField(null=True)
         duration = FloatField(null=True)
+        queue_wait = FloatField(null=True)
         status = CharField(index=True)
         sent_bytes = IntegerField(default=0)
         updates = IntegerField(default=0)
@@ -174,6 +175,9 @@ class SqliteMonitorStore:
         with self._db_lock:
             self._db.connect(reuse_if_open=True)
             self._db.create_tables([self.CallRecord, self.WorkerMetric], safe=True)
+            call_cols = {c.name for c in self._db.get_columns('call_records')}
+            if 'queue_wait' not in call_cols:
+                self._db.execute_sql('ALTER TABLE call_records ADD COLUMN queue_wait REAL')
             cols = {c.name for c in self._db.get_columns('worker_metrics')}
             migrations = {
                 'mem_avail': 'INTEGER DEFAULT 0',
@@ -437,7 +441,7 @@ class SqliteMonitorStore:
         duration, _ = WINDOWS.get(window, WINDOWS['15m'])
         cutoff = time.time() - duration
 
-        def _query() -> tuple[int, int, list[dict[str, Any]]]:
+        def _query() -> tuple[int, int, float, float, list[dict[str, Any]]]:
             with self._db_lock:
                 agg_query = (
                     self.CallRecord.select(
@@ -447,6 +451,7 @@ class SqliteMonitorStore:
                         fn.AVG(self.CallRecord.duration).alias('avg_duration'),
                         fn.MAX(self.CallRecord.duration).alias('max_duration'),
                         fn.MIN(self.CallRecord.duration).alias('min_duration'),
+                        fn.AVG(self.CallRecord.queue_wait).alias('avg_queue_wait'),
                         fn.SUM(self.CallRecord.sent_bytes).alias('total_bytes'),
                     )
                     .where(self.CallRecord.start_time >= cutoff)
@@ -464,6 +469,19 @@ class SqliteMonitorStore:
                 for row in dur_query.dicts():
                     durations_by_method[row['method']].append(float(row['duration']))
 
+                # Gather sorted queue waits per method & overall for p95 calculation
+                waits_by_method: dict[str, list[float]] = defaultdict(list)
+                all_waits: list[float] = []
+                wait_query = (
+                    self.CallRecord.select(self.CallRecord.method, self.CallRecord.queue_wait)
+                    .where((self.CallRecord.start_time >= cutoff) & (self.CallRecord.queue_wait.is_null(False)))
+                    .order_by(self.CallRecord.queue_wait.asc())
+                )
+                for row in wait_query.dicts():
+                    val = float(row['queue_wait'])
+                    waits_by_method[row['method']].append(val)
+                    all_waits.append(val)
+
                 methods: list[dict[str, Any]] = []
                 total_requests = 0
                 total_errors = 0
@@ -475,6 +493,8 @@ class SqliteMonitorStore:
                     total_errors += errs
                     durs = durations_by_method.get(m, [])
                     p95 = durs[min(len(durs) - 1, int(0.95 * len(durs)))] if durs else 0.0
+                    waits = waits_by_method.get(m, [])
+                    p95_wait = waits[min(len(waits) - 1, int(0.95 * len(waits)))] if waits else 0.0
                     methods.append({
                         'method': m,
                         'count': cnt,
@@ -483,15 +503,23 @@ class SqliteMonitorStore:
                         'p95_duration': round(float(p95), 4),
                         'max_duration': round(float(row['max_duration'] or 0.0), 4),
                         'min_duration': round(float(row['min_duration'] or 0.0), 4),
+                        'avg_queue_wait': round(float(row['avg_queue_wait'] or 0.0), 4),
+                        'p95_queue_wait': round(float(p95_wait), 4),
                         'total_bytes': int(row['total_bytes'] or 0),
                     })
-                return total_requests, total_errors, methods
+                overall_avg_wait = round(sum(all_waits) / len(all_waits), 4) if all_waits else 0.0
+                overall_p95_wait = round(
+                    all_waits[min(len(all_waits) - 1, int(0.95 * len(all_waits)))], 4
+                ) if all_waits else 0.0
+                return total_requests, total_errors, overall_avg_wait, overall_p95_wait, methods
 
-        total_requests, total_errors, methods = self._run_with_lock_retry(_query)
+        total_requests, total_errors, avg_queue_wait, p95_queue_wait, methods = self._run_with_lock_retry(_query)
         return {
             'window': window if window in WINDOWS else '15m',
             'total_requests': total_requests,
             'total_errors': total_errors,
+            'avg_queue_wait': avg_queue_wait,
+            'p95_queue_wait': p95_queue_wait,
             'methods': methods,
         }
 

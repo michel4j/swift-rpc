@@ -217,3 +217,117 @@ def test_monitor_persists_availability_kpis(tmp_path):
         assert pt['extra'] == {'load_1m': 1.25, 'slots_free': 2}
     finally:
         monitor.close()
+
+
+def test_broker_max_pending_backpressure():
+    from szrpc.protocol import Request
+    from szrpc.server import _BrokerState
+
+    state = _BrokerState(strategy='balancing', control_methods=set(), max_pending=2)
+    assert state.can_accept_clients() is True
+    req = Request(b'c1', b'r1', 'echo', {})
+    state.pending_requests.append((1.0, req))
+    assert state.can_accept_clients() is True
+    state.pending_requests.append((2.0, req))
+    assert state.can_accept_clients() is False
+
+
+def test_broker_queue_wait_and_summary_in_balancing_mode():
+    from szrpc.client import Client
+    from szrpc.server import Server
+    from szrpc.transport import InMemoryNetwork
+
+    class _SlowService(Service):
+        def remote__slow(self, request, delay=0.15):
+            time.sleep(delay)
+            return 'done'
+
+    network = InMemoryNetwork()
+    monitor = Monitor({'description': 'test', 'methods': ['slow']}, db_path=':memory:')
+    server = Server(
+        _SlowService,
+        instances=1,
+        threaded=True,
+        transport=network.broker(),
+        worker_transport_factory=lambda: network.worker(b'w-slow'),
+        monitor=monitor,
+    )
+    server.start(proxy='balancing')
+    try:
+        with Client(transport=network.client(b'c1')) as c1, Client(transport=network.client(b'c2')) as c2:
+            r1 = c1.slow(delay=0.15)
+            time.sleep(0.03)
+            r2 = c2.slow(delay=0.05)
+
+            assert r1.wait(timeout=3.0)
+            assert r2.wait(timeout=3.0)
+            assert r1.results == 'done'
+            assert r2.results == 'done'
+            monitor.store.flush()
+
+            calls = monitor.get_calls(window='15m')['calls']
+            assert len(calls) == 2
+
+            summary = monitor.get_summary(window='15m')
+            assert summary['total_requests'] == 2
+            assert summary['avg_queue_wait'] > 0.02
+            assert summary['p95_queue_wait'] >= summary['avg_queue_wait']
+            assert summary['methods'][0]['avg_queue_wait'] > 0.02
+
+            live = monitor.get_data()
+            assert live['stats']['queue_depth'] == 0
+            assert live['stats']['oldest_wait_s'] == 0.0
+    finally:
+        server.stop()
+
+
+def test_sqlite_store_migrates_missing_queue_wait_column(tmp_path):
+    db_path = tmp_path / 'legacy_calls.db'
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE call_records (
+            request_id TEXT PRIMARY KEY,
+            client_id TEXT NOT NULL,
+            method TEXT NOT NULL,
+            signature TEXT NOT NULL DEFAULT '',
+            worker_id TEXT NOT NULL,
+            start_time REAL NOT NULL,
+            end_time REAL,
+            duration REAL,
+            status TEXT NOT NULL,
+            sent_bytes INTEGER NOT NULL DEFAULT 0,
+            updates INTEGER NOT NULL DEFAULT 0,
+            kwargs_json TEXT NOT NULL DEFAULT '{}',
+            results_json TEXT NOT NULL DEFAULT '[]'
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    store = SqliteMonitorStore(db_path=db_path)
+    try:
+        now = time.time()
+        store.enqueue_call({
+            'request_id': 'req-1',
+            'client_id': 'c1',
+            'method': 'echo',
+            'signature': '',
+            'worker_id': 'w1',
+            'start_time': now,
+            'end_time': now + 0.1,
+            'duration': 0.1,
+            'queue_wait': 0.25,
+            'status': 'DONE',
+            'sent_bytes': 10,
+            'updates': 0,
+            'kwargs_json': '{}',
+            'results_json': '[]',
+        })
+        store.flush()
+        summary = store.get_summary(window='15m')
+        assert summary['avg_queue_wait'] == 0.25
+        assert summary['p95_queue_wait'] == 0.25
+    finally:
+        store.close()
