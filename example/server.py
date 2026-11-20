@@ -51,4 +51,4 @@ if __name__ == '__main__':
     log.log_to_console()
     factory = ServiceFactory(MyService, arg1=2, arg2=3, arg3=4.3, arg4='five')
     server = Server(factory, ports=(9990, 9991), instances=0, monitor_port=8080)
-    server.run(proxy='round-robin')
+    server.run(proxy='balancing')

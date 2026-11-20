@@ -12,7 +12,7 @@ if __name__ == '__main__':
     manager = WorkerManager(
         factory,
         address="tcp://localhost:9991",
-        instances=4,
+        instances=16,
         methods=(
             'progress',
             'date',
