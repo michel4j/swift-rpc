@@ -60,8 +60,12 @@ def _parse_heartbeat_content(content: Any) -> tuple[set[str], dict[str, Any] | N
         return set(), None, None
 
 
-class _WorkerMetricsSampler:
-    """Collects per-worker CPU, memory, and network I/O rates via psutil when available."""
+class WorkerMetricsSampler:
+    """Collects per-worker CPU, memory, and network I/O rates via psutil when available.
+
+    Subclasses may override ``sample(active_tasks)``—calling ``super().sample(active_tasks)``
+    and merging additional KPI keys into the returned dictionary.
+    """
 
     def __init__(self):
         self._proc = psutil.Process() if psutil is not None else None
@@ -74,6 +78,7 @@ class _WorkerMetricsSampler:
                 self._proc = None
 
     def sample(self, active_tasks: int) -> dict[str, Any]:
+        """Return a dict of current worker telemetry metrics."""
         metrics: dict[str, Any] = {
             'cpu_pct': 0.0,
             'mem_rss': 0,
@@ -97,6 +102,9 @@ class _WorkerMetricsSampler:
         except Exception:
             pass
         return metrics
+
+
+_WorkerMetricsSampler = WorkerMetricsSampler
 
 
 def control(fn: Callable) -> Callable:
@@ -270,6 +278,7 @@ class Worker(object):
         transport: WorkerTransport | None = None,
         pub_addr: str | None = None,
         worker_id: str | bytes | None = None,
+        metrics_sampler: WorkerMetricsSampler | None = None,
         **kwargs,
     ):
         """
@@ -279,6 +288,7 @@ class Worker(object):
         :param transport: Optional WorkerTransport adapter; defaults to ZmqWorkerTransport
         :param pub_addr: Optional ZMQ PUB address (broker XSUB) for broadcast events
         :param worker_id: Optional explicit worker identity; defaults to a persistent per-host/service lease
+        :param metrics_sampler: Optional WorkerMetricsSampler instance; defaults to create_metrics_sampler()
         """
 
         self.service = service
@@ -290,7 +300,12 @@ class Worker(object):
         self.worker_id: bytes | None = (
             worker_id.encode('utf-8') if isinstance(worker_id, str) else worker_id
         )
+        self._metrics_sampler = metrics_sampler
         self._stop_event = Event()
+
+    def create_metrics_sampler(self) -> WorkerMetricsSampler:
+        """Return the WorkerMetricsSampler for this worker; subclasses may override."""
+        return WorkerMetricsSampler()
 
     def is_supported(self, method: str) -> bool:
         """
@@ -364,7 +379,11 @@ class Worker(object):
 
             self.service.on_start()
             started = True
-            sampler = _WorkerMetricsSampler()
+            sampler = (
+                self._metrics_sampler
+                if self._metrics_sampler is not None
+                else self.create_metrics_sampler()
+            )
             # initial heartbeat message
             transport.send(
                 Response.heartbeat_message(methods=self.methods, metrics=sampler.sample(0), session=session_id)

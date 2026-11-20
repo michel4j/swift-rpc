@@ -172,6 +172,8 @@ class Monitor:
             if methods is not None:
                 self.worker_methods[worker_id] = list(methods)
         if metrics is not None:
+            core_keys = {'cpu_pct', 'mem_rss', 'net_rx_bps', 'net_tx_bps', 'active_tasks'}
+            extra = {k: v for k, v in metrics.items() if k not in core_keys}
             self.store.enqueue_metric({
                 'ts': now,
                 'worker_id': worker_id,
@@ -180,6 +182,7 @@ class Monitor:
                 'net_rx_bps': float(metrics.get('net_rx_bps', 0.0)),
                 'net_tx_bps': float(metrics.get('net_tx_bps', 0.0)),
                 'active_tasks': int(metrics.get('active_tasks', 0)),
+                'extra_json': _safe_json(extra) if extra else '{}',
             })
 
     def clear_workers(self, workers: Sequence[str]):

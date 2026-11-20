@@ -111,6 +111,7 @@ def _make_models(db: SqliteDatabase):
         net_rx_bps = FloatField(default=0.0)
         net_tx_bps = FloatField(default=0.0)
         active_tasks = IntegerField(default=0)
+        extra_json = TextField(default='{}')
 
         class Meta:
             table_name = 'worker_metrics'
@@ -170,6 +171,9 @@ class SqliteMonitorStore:
         with self._db_lock:
             self._db.connect(reuse_if_open=True)
             self._db.create_tables([self.CallRecord, self.WorkerMetric], safe=True)
+            cols = {c.name for c in self._db.get_columns('worker_metrics')}
+            if 'extra_json' not in cols:
+                self._db.execute_sql("ALTER TABLE worker_metrics ADD COLUMN extra_json TEXT DEFAULT '{}'")
 
     def _run_with_lock_retry(
         self,
@@ -326,6 +330,7 @@ class SqliteMonitorStore:
                         fn.AVG(self.WorkerMetric.net_rx_bps).alias('net_rx_bps'),
                         fn.AVG(self.WorkerMetric.net_tx_bps).alias('net_tx_bps'),
                         fn.MAX(self.WorkerMetric.active_tasks).alias('active_tasks'),
+                        self.WorkerMetric.extra_json.alias('extra_json'),
                     )
                     .where(self.WorkerMetric.ts >= cutoff)
                 )
@@ -335,14 +340,23 @@ class SqliteMonitorStore:
 
                 series: dict[str, list[dict[str, Any]]] = defaultdict(list)
                 for row in query.dicts():
-                    series[row['worker_id']].append({
+                    point: dict[str, Any] = {
                         'ts': row['bucket'],
                         'cpu_pct': round(float(row['cpu_pct'] or 0.0), 2),
                         'mem_rss': int(row['mem_rss'] or 0),
                         'net_rx_bps': round(float(row['net_rx_bps'] or 0.0), 1),
                         'net_tx_bps': round(float(row['net_tx_bps'] or 0.0), 1),
                         'active_tasks': int(row['active_tasks'] or 0),
-                    })
+                    }
+                    raw_extra = row.get('extra_json')
+                    if raw_extra and raw_extra != '{}':
+                        try:
+                            extra = json.loads(raw_extra)
+                            if isinstance(extra, dict) and extra:
+                                point['extra'] = extra
+                        except Exception:
+                            pass
+                    series[row['worker_id']].append(point)
                 return dict(series)
 
         return {
