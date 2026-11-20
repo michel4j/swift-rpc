@@ -765,8 +765,8 @@ class Server(object):
             backend.close(linger=0)
             ctx.term()
 
+    @staticmethod
     def _select_worker(
-        self,
         method: str,
         worker_queue: list[bytes],
         worker_methods: dict[bytes, set[str]],
