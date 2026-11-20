@@ -111,6 +111,9 @@ def _make_models(db: SqliteDatabase):
         net_rx_bps = FloatField(default=0.0)
         net_tx_bps = FloatField(default=0.0)
         active_tasks = IntegerField(default=0)
+        mem_avail = IntegerField(default=0)
+        mem_avail_pct = FloatField(default=0.0)
+        cpu_avail_pct = FloatField(default=0.0)
         extra_json = TextField(default='{}')
 
         class Meta:
@@ -172,8 +175,15 @@ class SqliteMonitorStore:
             self._db.connect(reuse_if_open=True)
             self._db.create_tables([self.CallRecord, self.WorkerMetric], safe=True)
             cols = {c.name for c in self._db.get_columns('worker_metrics')}
-            if 'extra_json' not in cols:
-                self._db.execute_sql("ALTER TABLE worker_metrics ADD COLUMN extra_json TEXT DEFAULT '{}'")
+            migrations = {
+                'mem_avail': 'INTEGER DEFAULT 0',
+                'mem_avail_pct': 'REAL DEFAULT 0.0',
+                'cpu_avail_pct': 'REAL DEFAULT 0.0',
+                'extra_json': "TEXT DEFAULT '{}'",
+            }
+            for col_name, col_def in migrations.items():
+                if col_name not in cols:
+                    self._db.execute_sql(f'ALTER TABLE worker_metrics ADD COLUMN {col_name} {col_def}')
 
     def _run_with_lock_retry(
         self,
@@ -330,6 +340,9 @@ class SqliteMonitorStore:
                         fn.AVG(self.WorkerMetric.net_rx_bps).alias('net_rx_bps'),
                         fn.AVG(self.WorkerMetric.net_tx_bps).alias('net_tx_bps'),
                         fn.MAX(self.WorkerMetric.active_tasks).alias('active_tasks'),
+                        fn.AVG(self.WorkerMetric.mem_avail).alias('mem_avail'),
+                        fn.AVG(self.WorkerMetric.mem_avail_pct).alias('mem_avail_pct'),
+                        fn.AVG(self.WorkerMetric.cpu_avail_pct).alias('cpu_avail_pct'),
                         self.WorkerMetric.extra_json.alias('extra_json'),
                     )
                     .where(self.WorkerMetric.ts >= cutoff)
@@ -347,6 +360,9 @@ class SqliteMonitorStore:
                         'net_rx_bps': round(float(row['net_rx_bps'] or 0.0), 1),
                         'net_tx_bps': round(float(row['net_tx_bps'] or 0.0), 1),
                         'active_tasks': int(row['active_tasks'] or 0),
+                        'mem_avail': int(row['mem_avail'] or 0),
+                        'mem_avail_pct': round(float(row['mem_avail_pct'] or 0.0), 2),
+                        'cpu_avail_pct': round(float(row['cpu_avail_pct'] or 0.0), 2),
                     }
                     raw_extra = row.get('extra_json')
                     if raw_extra and raw_extra != '{}':

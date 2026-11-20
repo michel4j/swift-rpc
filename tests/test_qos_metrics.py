@@ -155,3 +155,65 @@ def test_sqlite_store_migrates_missing_extra_json_column(tmp_path):
         assert res['series']['w-legacy'][0]['extra'] == {'slots_free': 4}
     finally:
         store.close()
+
+
+def test_worker_metrics_sampler_availability_kpis():
+    sampler = WorkerMetricsSampler(max_tasks=4, disk_path='/')
+    data = sampler.sample(1)
+    assert data['mem_avail'] > 0
+    assert 0.0 <= data['mem_avail_pct'] <= 100.0
+    assert 0.0 <= data['cpu_avail_pct'] <= 100.0
+    assert data['load_1m'] >= 0.0
+    assert data['cpu_count'] >= 1
+    assert data['max_tasks'] == 4
+    assert data['slots_free'] == 3
+    assert data['disk_free'] > 0
+
+    clamped = sampler.sample(10)
+    assert clamped['slots_free'] == 0
+
+
+def test_worker_metrics_sampler_without_psutil(monkeypatch):
+    import szrpc.server as server_mod
+
+    monkeypatch.setattr(server_mod, 'psutil', None)
+    sampler = WorkerMetricsSampler(max_tasks=2, disk_path='/')
+    data = sampler.sample(1)
+    assert data['cpu_pct'] == 0.0
+    assert data['mem_avail'] == 0
+    assert data['mem_avail_pct'] == 0.0
+    assert data['cpu_avail_pct'] == 0.0
+    assert data['cpu_count'] >= 1
+    assert data['max_tasks'] == 2
+    assert data['slots_free'] == 1
+    assert 'disk_free' not in data
+
+
+def test_monitor_persists_availability_kpis(tmp_path):
+    db_path = tmp_path / 'avail.db'
+    monitor = Monitor({'description': 'test', 'methods': []}, db_path=db_path)
+    try:
+        monitor.update_worker(
+            'w-avail',
+            metrics={
+                'cpu_pct': 20.0,
+                'mem_rss': 2048,
+                'net_rx_bps': 0.0,
+                'net_tx_bps': 0.0,
+                'active_tasks': 2,
+                'mem_avail': 1_000_000,
+                'mem_avail_pct': 62.5,
+                'cpu_avail_pct': 80.0,
+                'load_1m': 1.25,
+                'slots_free': 2,
+            },
+        )
+        monitor.store.flush()
+        hist = monitor.get_worker_metrics(window='15m', worker_id='w-avail')
+        pt = hist['series']['w-avail'][0]
+        assert pt['mem_avail'] == 1_000_000
+        assert pt['mem_avail_pct'] == 62.5
+        assert pt['cpu_avail_pct'] == 80.0
+        assert pt['extra'] == {'load_1m': 1.25, 'slots_free': 2}
+    finally:
+        monitor.close()

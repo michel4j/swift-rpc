@@ -61,13 +61,15 @@ def _parse_heartbeat_content(content: Any) -> tuple[set[str], dict[str, Any] | N
 
 
 class WorkerMetricsSampler:
-    """Collects per-worker CPU, memory, and network I/O rates via psutil when available.
+    """Collects per-worker CPU, memory, network I/O, and resource availability metrics.
 
     Subclasses may override ``sample(active_tasks)``—calling ``super().sample(active_tasks)``
     and merging additional KPI keys into the returned dictionary.
     """
 
-    def __init__(self):
+    def __init__(self, max_tasks: int | None = None, disk_path: str | None = None):
+        self.max_tasks = max_tasks
+        self.disk_path = disk_path
         self._proc = psutil.Process() if psutil is not None else None
         self._last_ts = time.time()
         self._last_net = psutil.net_io_counters() if psutil is not None else None
@@ -76,31 +78,72 @@ class WorkerMetricsSampler:
                 self._proc.cpu_percent(interval=None)
             except Exception:
                 self._proc = None
+        if psutil is not None:
+            try:
+                psutil.cpu_percent(interval=None)
+            except Exception:
+                pass
 
     def sample(self, active_tasks: int) -> dict[str, Any]:
-        """Return a dict of current worker telemetry metrics."""
+        """Return a dict of current worker telemetry and resource availability metrics."""
+        cpu_count = (psutil.cpu_count(logical=True) if psutil is not None else os.cpu_count()) or 1
+        try:
+            load_1m = round(float(os.getloadavg()[0]), 2)
+        except (AttributeError, OSError):
+            load_1m = 0.0
+
         metrics: dict[str, Any] = {
             'cpu_pct': 0.0,
             'mem_rss': 0,
             'net_rx_bps': 0.0,
             'net_tx_bps': 0.0,
             'active_tasks': active_tasks,
+            'mem_avail': 0,
+            'mem_avail_pct': 0.0,
+            'cpu_avail_pct': 0.0,
+            'load_1m': load_1m,
+            'cpu_count': int(cpu_count),
         }
-        if self._proc is None:
+        if self.max_tasks is not None:
+            metrics['max_tasks'] = int(self.max_tasks)
+            metrics['slots_free'] = max(0, int(self.max_tasks) - active_tasks)
+
+        if psutil is None:
             return metrics
-        now = time.time()
-        dt = max(now - self._last_ts, 1e-3)
+
+        if self._proc is not None:
+            now = time.time()
+            dt = max(now - self._last_ts, 1e-3)
+            try:
+                metrics['cpu_pct'] = round(self._proc.cpu_percent(interval=None), 2)
+                metrics['mem_rss'] = int(self._proc.memory_info().rss)
+                net_io = psutil.net_io_counters()
+                if net_io is not None and self._last_net is not None:
+                    metrics['net_rx_bps'] = round(max(0, net_io.bytes_recv - self._last_net.bytes_recv) / dt, 1)
+                    metrics['net_tx_bps'] = round(max(0, net_io.bytes_sent - self._last_net.bytes_sent) / dt, 1)
+                self._last_net = net_io
+                self._last_ts = now
+            except Exception:
+                pass
+
         try:
-            metrics['cpu_pct'] = round(self._proc.cpu_percent(interval=None), 2)
-            metrics['mem_rss'] = int(self._proc.memory_info().rss)
-            net_io = psutil.net_io_counters()
-            if net_io is not None and self._last_net is not None:
-                metrics['net_rx_bps'] = round(max(0, net_io.bytes_recv - self._last_net.bytes_recv) / dt, 1)
-                metrics['net_tx_bps'] = round(max(0, net_io.bytes_sent - self._last_net.bytes_sent) / dt, 1)
-            self._last_net = net_io
-            self._last_ts = now
+            vm = psutil.virtual_memory()
+            metrics['mem_avail'] = int(vm.available)
+            metrics['mem_avail_pct'] = round(max(0.0, 100.0 - float(vm.percent)), 2)
         except Exception:
             pass
+
+        try:
+            metrics['cpu_avail_pct'] = round(max(0.0, 100.0 - float(psutil.cpu_percent(interval=None))), 2)
+        except Exception:
+            pass
+
+        if self.disk_path is not None:
+            try:
+                metrics['disk_free'] = int(psutil.disk_usage(self.disk_path).free)
+            except Exception:
+                pass
+
         return metrics
 
 
