@@ -140,7 +140,7 @@ describe('format.js', () => {
   });
 
   it('normalizes status parameters and shared call helpers', () => {
-    assert.equal(FORMAT_REQUESTS_PAGE_SIZE, 25);
+    assert.equal(FORMAT_REQUESTS_PAGE_SIZE, 15);
     assert.equal(formatNormalizeStatusParam('error'), 'ERROR');
     assert.equal(formatNormalizeStatusParam('ACTIVE'), '');
     assert.equal(formatNormalizeStatusParam('done'), 'DONE');
@@ -676,31 +676,31 @@ describe('pages/requests.js', () => {
   });
 
   it('computes pagination bounds and button states accurately', () => {
-    assert.equal(REQUESTS_PAGE_SIZE, 25);
+    assert.equal(REQUESTS_PAGE_SIZE, 15);
 
     assert.deepEqual(
-      computePaginationRange({ total: 0, offset: 0, limit: 25, displayedCount: 0 }),
-      { start: 0, end: 0, total: 0, hasPrev: false, hasNext: false, prevOffset: 0, nextOffset: 25 },
+      computePaginationRange({ total: 0, offset: 0, limit: 15, displayedCount: 0 }),
+      { start: 0, end: 0, total: 0, hasPrev: false, hasNext: false, prevOffset: 0, nextOffset: 15 },
     );
 
     assert.deepEqual(
-      computePaginationRange({ total: 60, offset: 0, limit: 25, displayedCount: 25 }),
-      { start: 1, end: 25, total: 60, hasPrev: false, hasNext: true, prevOffset: 0, nextOffset: 25 },
+      computePaginationRange({ total: 60, offset: 0, limit: 15, displayedCount: 15 }),
+      { start: 1, end: 15, total: 60, hasPrev: false, hasNext: true, prevOffset: 0, nextOffset: 15 },
     );
 
     assert.deepEqual(
-      computePaginationRange({ total: 60, offset: 25, limit: 25, displayedCount: 25 }),
-      { start: 26, end: 50, total: 60, hasPrev: true, hasNext: true, prevOffset: 0, nextOffset: 50 },
+      computePaginationRange({ total: 60, offset: 15, limit: 15, displayedCount: 15 }),
+      { start: 16, end: 30, total: 60, hasPrev: true, hasNext: true, prevOffset: 0, nextOffset: 30 },
     );
 
     assert.deepEqual(
-      computePaginationRange({ total: 60, offset: 50, limit: 25, displayedCount: 10 }),
-      { start: 51, end: 60, total: 60, hasPrev: true, hasNext: false, prevOffset: 25, nextOffset: 75 },
+      computePaginationRange({ total: 60, offset: 50, limit: 15, displayedCount: 10 }),
+      { start: 51, end: 60, total: 60, hasPrev: true, hasNext: false, prevOffset: 35, nextOffset: 65 },
     );
 
     assert.deepEqual(
-      computePaginationRange({ total: 25, offset: 0, limit: 25, displayedCount: 25 }),
-      { start: 1, end: 25, total: 25, hasPrev: false, hasNext: false, prevOffset: 0, nextOffset: 25 },
+      computePaginationRange({ total: 25, offset: 0, limit: 15, displayedCount: 15 }),
+      { start: 1, end: 15, total: 25, hasPrev: false, hasNext: true, prevOffset: 0, nextOffset: 15 },
     );
   });
 });
