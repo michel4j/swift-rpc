@@ -58,7 +58,7 @@ class App(QApplication):
             else:
                 self.monitor(self.client.date())
             i += 1
-            time.sleep(0.5)
+            time.sleep(random.randint(1, 5))
 
             # Remove completed results
             self.results = [res for res in self.results if not res.is_ready()]
